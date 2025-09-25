@@ -26,8 +26,8 @@ def launch(launcher_func: Callable):
     parser = proxy_command_parser()
     parser, proxy_runner = launcher_func(parser)
     opts = parser.parse_args()
-    proxy_token = UUID(hex=sys.stdin.buffer.read(32).hex())
-    manager_token = UUID(hex=sys.stdin.buffer.read(32).hex())
+    proxy_token = UUID(hex=sys.stdin.read(32))
+    manager_token = UUID(hex=sys.stdin.read(32))
     if iscoroutinefunction(proxy_runner):
         run(proxy_runner(token=proxy_token, manager_token=manager_token, **vars(opts)))
     else:
