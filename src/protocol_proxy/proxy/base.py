@@ -1,6 +1,7 @@
 import abc
 import json
 import logging
+import sys
 
 from importlib import import_module
 from pkgutil import iter_modules
@@ -46,8 +47,12 @@ class ProtocolProxy(IPCConnector, metaclass=abc.ABCMeta):
         """Send a registration message to the remote manager."""
 
     def apply_plugins(self):
+        module_name = type(self).__module__
+        if module_name == '__main__':    # Running via "python -m"; runpy records the real name in __spec__.
+            spec = getattr(sys.modules.get('__main__'), '__spec__', None)
+            module_name = spec.name if spec else ''
         try:
-            installed_plugins = import_module(f'protocol_proxy.plugins.protocol.{self.__module__.split(".")[2]}')
+            installed_plugins = import_module(f'protocol_proxy.plugins.protocol.{module_name.split(".")[2]}')
             for m in iter_modules(installed_plugins.__path__, installed_plugins.__name__ + '.'):
                 if hasattr(m, 'name') and m.name.split('.')[-1]:
                     module = import_module(m.name)
@@ -58,8 +63,8 @@ class ProtocolProxy(IPCConnector, metaclass=abc.ABCMeta):
             return
         except AttributeError as e:
             _log.warning(f'Unable to load plugin "{m.name}: {e}')
-        except IndexError as e:
-            _log.warning('Unable to determine protocol_type to load plugins.')
+        except IndexError:
+            _log.warning(f'Unable to determine protocol_type to load plugins (module: "{module_name}").')
         except Exception as e:
             _log.warning(f'Unexpected error loading plugins: {e}')
 

@@ -52,7 +52,9 @@ class GeventIPCConnector(IPCConnector):
             try:
                 inbound_socket.bind(socket_params)
                 inbound_socket.listen(5)  # TODO: The default is "a reasonable value". Should this be left "reasonable"?
+                self.inbound_params = SocketParams(*inbound_socket.getsockname()[:2])
                 self.inbound_server_socket = inbound_socket
+                self.inbounds.add(self.inbound_server_socket)
                 return
             except (OSError, Exception) as e:
                 _log.warning(f'Unable to bind to provided inbound socket {socket_params}. Trying next available. - {e}')
@@ -91,6 +93,9 @@ class GeventIPCConnector(IPCConnector):
 
     def send(self, remote: ProtocolProxyPeer, message: ProtocolProxyMessage) -> bool | AsyncResult:
         """Send a message to the remote and return a bool, AsyncResult (gevent) or Future (asyncio)."""
+        if not isinstance(remote, ProtocolProxyPeer):
+            _log.error(f'{self.proxy_name}: send() requires a ProtocolProxyPeer, got {type(remote).__name__}: {remote}')
+            return False
         outbound = socket(AF_INET, SOCK_STREAM)
         outbound.setblocking(False)
         try:
@@ -103,7 +108,8 @@ class GeventIPCConnector(IPCConnector):
                 if (error_code := outbound.connect_ex(remote.socket_params)) != 115:
                     _log.warning(f'{self.proxy_name} Connection to outbound socket returned code: {error_code}.')
         except (OSError, Exception) as e:
-            _log.warning(f"{self.proxy_name}: Unexpected error connecting to {remote.socket_params}: {e}")
+            _log.warning(f"{self.proxy_name}: Unexpected error connecting to"
+                         f" {getattr(remote, 'socket_params', remote)}: {e}")
             return False
         if message.request_id is None:
             message.request_id = self.next_request_id
