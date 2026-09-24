@@ -1,4 +1,5 @@
 import asyncio
+import inspect
 import json # TODO: Should we really be using JSON for error responses. If not, then what?
 import logging
 
@@ -40,7 +41,9 @@ class AsyncioIPCConnector(IPCConnector):
             result.set_result(raw_message)
 
     async def send(self, remote: AsyncioProtocolProxyPeer, message: ProtocolProxyMessage) -> bool | Future:
-        #on_lost_connection = self.loop.create_future()
+        if not isinstance(remote, ProtocolProxyPeer):
+            _log.error(f'{self.proxy_name}: send() requires a ProtocolProxyPeer, got {type(remote).__name__}: {remote}')
+            return False
         if message.request_id is None:
             message.request_id = self.next_request_id
         if message.response_expected:
@@ -72,7 +75,8 @@ class AsyncioIPCConnector(IPCConnector):
         factory = IPCProtocol.get_factory(connector=self, on_lost_connection=on_lost_connection)
         if socket_params:
             try:
-                self.inbound_server = await self.loop.create_server(factory, *socket_params, start_serving=True)
+                self.inbound_server = await self.loop.create_server(factory, *socket_params,
+                                                                    start_serving=True, family=2)
                 return
             except (OSError, Exception) as e:
                 _log.warning(f'Unable to bind to provided inbound socket {socket_params}. Trying next available. - {e}')
@@ -82,7 +86,7 @@ class AsyncioIPCConnector(IPCConnector):
             try:
                 next_port = next(self.unused_ports(await self._get_ip_addresses(socket_params.address)))
                 self.inbound_server = await self.loop.create_server(factory, socket_params.address, next_port,
-                                                                    start_serving=True)
+                                                                    start_serving=True, family=2)
                 #_log.debug(f'{self.proxy_name} AFTER START SERVING. Server is: {self.inbound_server}')
             except OSError:
                 continue
@@ -172,14 +176,20 @@ class IPCProtocol(BufferedProtocol):
 
     async def _run_callback(self, callback_info: ProtocolProxyCallback, headers, data):
         try:
-            result = await asyncio.wait_for(callback_info.method(self.connector, headers, data.tobytes()),
-                                            timeout=callback_info.timeout)
+            result = callback_info.method(self.connector, headers, data.tobytes())
+            if inspect.isawaitable(result):
+                result = await asyncio.wait_for(result, timeout=callback_info.timeout)
         except asyncio.TimeoutError as e:
             error_message = f"timed out after {callback_info.timeout} seconds with error message: {e}"
             _log.warning(f'{self.connector.proxy_name} -- Callback {headers.method_name} {error_message}')
             error_response = {'status': 'error', 'error': f'Operation {error_message}', 'method': headers.method_name}
             result = json.dumps(error_response).encode('utf8')
+        except Exception as e:
+            _log.warning(f'{self.connector.proxy_name} -- Callback {headers.method_name} raised: {e!r}')
+            result = json.dumps({'status': 'error', 'error': repr(e), 'method': headers.method_name}).encode('utf8')
         if callback_info.provides_response:
+            if result is None:
+                result = b''
             message = ProtocolProxyMessage(method_name='RESPONSE', payload=result, request_id=headers.request_id)
             self.transport.write(self._message_to_bytes(message))
             self.transport.close()
