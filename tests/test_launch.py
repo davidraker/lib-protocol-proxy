@@ -1,4 +1,6 @@
+import asyncio
 import io
+import sys
 import json
 import logging
 from unittest import mock
@@ -11,7 +13,8 @@ from protocol_proxy.manager.base import ProtocolProxyManager
 import importlib
 
 launch_module = importlib.import_module('protocol_proxy.proxy.launch')
-from protocol_proxy.proxy.launch import JsonLineFormatter, _read_tokens, launch, proxy_command_parser, str2bool
+from protocol_proxy.proxy.launch import (JsonLineFormatter, _read_tokens, default_launcher, launch, main,
+                                         proxy_command_parser, resolve_launcher, str2bool)
 
 
 def test_str2bool():
@@ -101,3 +104,77 @@ def test_redact_masks_credentials_only():
     from protocol_proxy.proxy.launch import redact
     assert redact({'host': 'h', 'password': 'p', 'nats_token': 't', 'manager_token': None, 'tls': False}) == \
         {'host': 'h', 'password': '***', 'nats_token': '***', 'manager_token': None, 'tls': False}
+
+
+
+class _NoOptionsProxy:
+    """Stands in for a proxy class without a LAUNCHER (e.g., ModbusProxy)."""
+    LAUNCHER = None
+    created = []
+
+    def __init__(self, **options):
+        self.options = options
+        _NoOptionsProxy.created.append(self)
+
+    async def start(self):
+        self.started = True
+
+
+class _OptionsProxy:
+    LAUNCHER = 'launch_with_options'
+
+
+def launch_with_options(parser):
+    parser.add_argument('--flavour', default='plain')
+    return parser, lambda **options: 0
+
+
+def test_resolve_launcher_uses_default_when_no_launcher_declared():
+    launcher = resolve_launcher(f'{__name__}:_NoOptionsProxy')
+    parser, runner = launcher(proxy_command_parser())
+    assert vars(parser.parse_args(BASE_ARGS)).keys() >= {'proxy_id', 'manager_id'}
+    assert asyncio.run(runner(token='t', manager_token='m')) == 0
+    proxy = _NoOptionsProxy.created[-1]
+    assert proxy.options == {'token': 't', 'manager_token': 'm'} and proxy.started
+
+
+def test_resolve_launcher_uses_declared_module_function():
+    assert resolve_launcher(f'{__name__}:_OptionsProxy') is launch_with_options
+
+
+@pytest.mark.parametrize('ref, message', [
+    ('nomodule', 'must be <module>:<ProxyClass>'),
+    (f'{__name__}:Nope', "has no attribute 'Nope'"),
+    ('protocol_proxy.no_such_module:X', 'No module named'),
+])
+def test_resolve_launcher_errors(ref, message):
+    with pytest.raises((ValueError, AttributeError, ImportError), match=message):
+        resolve_launcher(ref)
+
+
+def test_main_requires_proxy_reference(capsys):
+    assert main([]) == 2 and main(['--proxy-id', 'x']) == 2
+    assert 'usage:' in capsys.readouterr().err
+    assert main([f'{__name__}:Nope'] + BASE_ARGS) == 2
+
+
+def test_main_launches_default_proxy_with_tokens():
+    a, b = uuid4(), uuid4()
+    with mock.patch.object(launch_module.sys, 'stdin', mock.Mock(buffer=io.BytesIO((a.hex + b.hex).encode()))), \
+         mock.patch.object(launch_module, 'configure_logging'):
+        assert main([f'{__name__}:_NoOptionsProxy'] + BASE_ARGS + ['--inbound-port', '7']) == 0
+    proxy = _NoOptionsProxy.created[-1]
+    assert proxy.options['token'] == a and proxy.options['manager_token'] == b
+    assert proxy.options['inbound_params'] == SocketParams('localhost', 7)
+
+
+def test_main_gevent_flag_patches_before_import(monkeypatch):
+    patched = []
+    fake_monkey = mock.Mock(patch_all=lambda **kw: patched.append(kw))
+    monkeypatch.setitem(sys.modules, 'gevent', mock.Mock(monkey=fake_monkey))
+    monkeypatch.setitem(sys.modules, 'gevent.monkey', fake_monkey)
+    order = []
+    with mock.patch.object(launch_module, 'resolve_launcher', side_effect=lambda ref: order.append(('resolve', ref)) or (lambda p: (p, lambda **o: 0))), \
+         mock.patch.object(launch_module, 'launch', return_value=0):
+        assert main(['--gevent', 'm:C', '--x']) == 0
+    assert patched == [{'thread': False}] and order == [('resolve', 'm:C')]

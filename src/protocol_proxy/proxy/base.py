@@ -5,6 +5,7 @@ import sys
 
 from importlib import import_module
 from pkgutil import iter_modules
+from typing import ClassVar
 from uuid import UUID
 
 from ..ipc import IPCConnector, ProtocolProxyMessage, ProtocolProxyPeer, SocketParams
@@ -14,6 +15,13 @@ _log = logging.getLogger(__name__)
 
 # noinspection PyMissingConstructor
 class ProtocolProxy(IPCConnector, metaclass=abc.ABCMeta):
+    # Name of a module-level function, in the same module as the subclass, which adds protocol-specific command-line
+    # options: ``(ArgumentParser) -> (ArgumentParser, runner)`` where ``runner(**options)`` creates and starts the
+    # proxy. None means the proxy takes no options and is launched as ``cls(**options).start()``.
+    LAUNCHER: ClassVar[str | None] = None
+    # Whether the proxy process must be gevent monkey-patched before this module is imported.
+    PATCH_GEVENT: ClassVar[bool] = False
+
     def __init__(self, *, manager_address: str, manager_port: int, manager_id: UUID,
                  registration_retry_delay: float = 20.0, **kwargs):
         """NOTE: Proxy implementations MUST:

@@ -15,6 +15,8 @@ _log = logging.getLogger(__name__)
 
 
 class GeventProtocolProxy(GeventIPCConnector, ProtocolProxy, ABC):
+    PATCH_GEVENT = True     # gevent proxies rely on patched sockets; see protocol_proxy.proxy.launch.main
+
     def __init__(self, *, proxy_id: UUID, token: UUID, manager_address: str, manager_port: int, manager_id: UUID,
                  manager_token: UUID, proxy_name: str = None, registration_retry_delay: float = 20.0,
                  registration_attempts: int = 2, registration_timeout: float = 5.0, **kwargs):
