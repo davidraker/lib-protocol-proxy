@@ -17,7 +17,8 @@ def test_command_line_skips_none_and_manager_only_kwargs():
     manager.inbound_params = SocketParams('127.0.0.1', 22801)
     command, proxy_id, name = manager._setup_proxy_process_command(
         ('dummy', 'x'), host='h', port=1, password=None, tls=True, manager_callbacks=[(print, 'X')])
-    assert command[1:3] == ['-m', DummyProxy.__module__]
+    # DummyProxy is a GeventProtocolProxy, so the entry point is told to monkey-patch before importing it.
+    assert command[1:5] == ['-m', 'protocol_proxy.proxy', '--gevent', f'{DummyProxy.__module__}:DummyProxy']
     tail = command[command.index('--host'):]
     assert tail == ['--host', 'h', '--port', '1', '--tls', 'True']
     assert '--manager-callbacks' not in command and '--password' not in command

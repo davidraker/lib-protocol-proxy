@@ -45,7 +45,10 @@ class ProtocolProxyManager(IPCConnector, ABC):
             kwargs = {k: v for k, v in kwargs.items() if k != 'manager_callbacks' and v is not None}
             protocol_specific_params = [i for pair in [(f"--{k.replace('_', '-')}", str(v))
                                                        for k, v in kwargs.items()] for i in pair]
-            command = [sys.executable, '-m', module, '--proxy-id', proxy_id.hex, '--proxy-name', proxy_name,
+            # Launched through the generic entry point so the proxy module is imported exactly once (see launch.main).
+            entry_options = ['--gevent'] if getattr(self.proxy_class, 'PATCH_GEVENT', False) else []
+            command = [sys.executable, '-m', 'protocol_proxy.proxy', *entry_options, f'{module}:{func}',
+                       '--proxy-id', proxy_id.hex, '--proxy-name', proxy_name,
                        '--manager-id', self.proxy_id.hex, '--manager-address', self.inbound_params.address,
                        '--manager-port', str(self.inbound_params.port), *protocol_specific_params]
         else:
