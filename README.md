@@ -40,6 +40,20 @@ for contributing to this and/or other VOLTTRON repositories.
 
 [//]: # (in your VOLTTRON agent or other applications.)
 
+# Process supervision
+
+A `ProtocolProxyManager` launches one proxy process per proxy key and watches it. When a proxy process exits, the
+manager logs the exit code, forgets the peer (so the next `get_proxy` for that key launches a fresh process) and calls
+every listener registered with `manager.on_peer_lost(callback)` as `callback(peer, reason)`. Users of a proxy, such as
+VOLTTRON driver interfaces, re-run their setup from that callback: `get_proxy`, `wait_peer_registered` and their own
+registration message. A proxy that never registers within the `wait_peer_registered` timeout is treated the same way,
+and its process is terminated.
+
+Each proxy process watches its parent in turn (`manager_alive`, by parent PID, every `manager_watch_interval`
+seconds, 1.0 by default). If the manager process dies, the proxy calls `on_manager_lost` (by default: log and stop),
+so an orphaned proxy releases its sockets instead of competing with the replacement a restarted manager launches. A
+protocol proxy that holds state may override `on_manager_lost` to flush it first.
+
 # Disclaimer Notice
 
 This material was prepared as an account of work sponsored by an agency of the

@@ -144,3 +144,30 @@ def test_asyncio_run_callback_accepts_sync_and_async_callbacks():
         await protocol._run_callback(info, headers, memoryview(b'x'))
         assert json.loads(protocol.transport.write.call_args.args[0])['status'] == 'error'
     asyncio.run(main())
+
+
+def test_manager_alive_follows_the_parent_pid():
+    p = gevent_proxy()
+    assert p.manager_alive()
+    with mock.patch('protocol_proxy.proxy.base.os.getppid', return_value=1):
+        assert not p.manager_alive()
+
+
+def test_gevent_proxy_stops_when_the_manager_disappears():
+    p = gevent_proxy()
+    p.manager_watch_interval = 0.01
+    with mock.patch.object(p, 'manager_alive', side_effect=[True, True, False]):
+        p._watch_manager()
+    assert p._stop and p._manager_lost
+
+
+def test_asyncio_start_returns_when_the_manager_disappears():
+    async def main():
+        p = AsyncioDummy(proxy_id=uuid4(), token=uuid4(), manager_address='127.0.0.1', manager_port=1,
+                         manager_id=uuid4(), manager_token=uuid4(), manager_watch_interval=0.01)
+        p.inbound_params = SocketParams('127.0.0.1', 0)
+        with mock.patch.object(p, 'send_registration', mock.AsyncMock(return_value=True)), \
+             mock.patch.object(p, 'manager_alive', side_effect=[True, False]):
+            await asyncio.wait_for(p.start(), 2)        # serve_forever ends instead of raising CancelledError
+        assert p._manager_lost and not p.inbound_server.is_serving()
+    asyncio.run(main())

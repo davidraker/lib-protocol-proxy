@@ -60,10 +60,29 @@ class AsyncioProtocolProxy(AsyncioIPCConnector, ProtocolProxy, ABC):
                    f' after {self.registration_attempts} attempts.')
         return False
 
+    async def _watch_manager(self):
+        while self.manager_alive():
+            await asyncio.sleep(self.manager_watch_interval)
+        self._manager_lost = True
+        result = self.on_manager_lost()
+        if asyncio.iscoroutine(result):
+            await result
+
+    async def stop(self):
+        if self.inbound_server is not None:
+            await super(AsyncioProtocolProxy, self).stop()
+
     async def start(self):
-        """Create the inbound server, register with the manager, then serve until stopped."""
+        """Create the inbound server, register with the manager, then serve until stopped (or orphaned)."""
         await super(AsyncioProtocolProxy, self).start()
         if not await self.send_registration(cast(AsyncioProtocolProxyPeer, self.peers[self.manager])):
             raise RuntimeError(f'{self.proxy_name}: registration with the Proxy Manager failed.')
-        async with self.inbound_server:
-            await self.inbound_server.serve_forever()
+        watchdog = asyncio.ensure_future(self._watch_manager())
+        try:
+            async with self.inbound_server:
+                await self.inbound_server.serve_forever()
+        except asyncio.CancelledError:
+            if not self._manager_lost:      # closing the server from on_manager_lost cancels serve_forever
+                raise
+        finally:
+            watchdog.cancel()

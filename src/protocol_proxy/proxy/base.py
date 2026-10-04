@@ -1,6 +1,7 @@
 import abc
 import json
 import logging
+import os
 import sys
 
 from importlib import import_module
@@ -23,7 +24,7 @@ class ProtocolProxy(IPCConnector, metaclass=abc.ABCMeta):
     PATCH_GEVENT: ClassVar[bool] = False
 
     def __init__(self, *, manager_address: str, manager_port: int, manager_id: UUID,
-                 registration_retry_delay: float = 20.0, **kwargs):
+                 registration_retry_delay: float = 20.0, manager_watch_interval: float = 1.0, **kwargs):
         """NOTE: Proxy implementations MUST:
             1. Subclass a multitasking subclass of IPCConnector (gevent, asyncio, etc.)
             2. Subclass this "ProtocolProxy" class.
@@ -36,7 +37,22 @@ class ProtocolProxy(IPCConnector, metaclass=abc.ABCMeta):
         self.registration_retry_delay: float = registration_retry_delay
         self.manager_params = SocketParams(manager_address, manager_port)
         self.manager = manager_id
+        # The manager is the parent process. If it dies, this proxy is an orphan: it would hold its listeners and
+        # ports while a restarted manager launches a replacement, so the run loops watch the parent and stop.
+        self.manager_watch_interval: float = manager_watch_interval
+        self._parent_pid: int = os.getppid()
+        self._manager_lost: bool = False
         self.apply_plugins()
+
+    def manager_alive(self) -> bool:
+        """Whether the process that launched this proxy is still its parent (an orphan is re-parented)."""
+        return os.getppid() == self._parent_pid
+
+    def on_manager_lost(self):
+        """Called once, from the run loop, when the manager process has gone. The default logs and stops the proxy;
+        a protocol may override this to flush state first (and should still call super or stop)."""
+        _log.warning(f'{self.proxy_name}: the manager process ({self._parent_pid}) is gone. Stopping.')
+        return self.stop()      # a coroutine for asyncio proxies; the watchdog awaits it
 
 
     @abc.abstractmethod

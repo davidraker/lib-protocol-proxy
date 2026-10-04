@@ -73,12 +73,20 @@ class GeventProtocolProxy(GeventIPCConnector, ProtocolProxy, ABC):
         while not self._stop:
             sleep(0.5)
 
+    def _watch_manager(self):
+        while not self._stop and self.manager_alive():
+            sleep(self.manager_watch_interval)
+        if not self._stop:
+            self._manager_lost = True
+            self.on_manager_lost()
+
     def start(self, *_, **__) -> list[Greenlet]:
-        """Create the inbound socket, then start the select loop, registration, and main loop."""
+        """Create the inbound socket, then start the select loop, registration, main loop and manager watchdog."""
         super(GeventProtocolProxy, self).start()
         self._greenlets = [spawn(self.select_loop),
                            spawn(self.send_registration, cast(GeventProtocolProxyPeer, self.peers[self.manager])),
-                           spawn(self.main_loop)]
+                           spawn(self.main_loop),
+                           spawn(self._watch_manager)]
         return self._greenlets
 
     def run(self) -> int:

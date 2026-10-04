@@ -32,14 +32,36 @@ class GeventProtocolProxyManager(ProtocolProxyManager, GeventIPCConnector, ABC):
         try:
             with peer.ready:
                 with_timeout(timeout, wait_for_peer_registration)
-                if func:
-                    func(*args, **kwargs)
         except Timeout:
             _log.warning(f"Peer {peer.proxy_id} did not register within {timeout} seconds. Removing peer.")
+            self._lose_peer(peer, f'did not register within {timeout} seconds')
+            return
+        if func:
+            try:
+                func(*args, **kwargs)
+            except Exception as e:
+                # The peer itself is fine; only this caller's follow-up failed. Keep the peer for everyone else.
+                _log.error(f"Error running post-registration function for peer {peer.proxy_id}: {e}")
+
+    def _lose_peer(self, peer: ProtocolProxyPeer, reason: str):
+        """Forget a peer and stop its process if it is still running, then tell the peer-lost listeners."""
+        if self.peers.get(peer.proxy_id) is peer:
             del self.peers[peer.proxy_id]
-        except Exception as e:
-            _log.error(f"Error while waiting for peer {peer.proxy_id} to be ready: {e}. Removing peer.")
-            del self.peers[peer.proxy_id]
+        if (process := getattr(peer, 'process', None)) is not None and process.poll() is None:
+            spawn(self._cleanup_proxy_process, process)
+        self._notify_peer_lost(peer, reason)
+
+    def _watch_proxy_process(self, proxy_id, peer: GeventProtocolProxyPeer):
+        """Wait for a launched proxy process to exit; when it does, drop its peer (if it is still the current one for
+        this proxy id) so the next get_proxy relaunches, and tell the listeners so they can re-register."""
+        returncode = peer.process.wait()
+        if self.peers.get(proxy_id) is peer:
+            _log.warning(f'PPM: {self.proxy_class.__name__} process {peer.process.pid} (proxy {proxy_id}) exited with'
+                         f' code {returncode}. It will be relaunched on the next request for it.')
+            self._lose_peer(peer, f'process exited with code {returncode}')
+        else:
+            _log.debug(f'PPM: {self.proxy_class.__name__} process {peer.process.pid} (proxy {proxy_id}) exited with'
+                       f' code {returncode} after its peer was already replaced or removed.')
 
     def get_proxy(self, unique_remote_id: tuple, **kwargs) -> ProtocolProxyPeer:
         #_log.debug('@@@@@@@ IN GET_PROXY @@@@@@@')
@@ -61,6 +83,7 @@ class GeventProtocolProxyManager(ProtocolProxyManager, GeventIPCConnector, ABC):
             self.peers[proxy_id] = GeventProtocolProxyPeer(process=proxy_process, proxy_id=proxy_id,
                                                            token=new_peer_token)
             atexit.register(self._cleanup_proxy_process, proxy_process)
+            spawn(self._watch_proxy_process, proxy_id, self.peers[proxy_id])
             # Do NOT send to the proxy until it has registered and socket_params is set!
             _log.info(f"PPM: Proxy {proxy_id} created, waiting for registration before sending.")
         #_log.debug(f'@@@@@@@ GET_PROXY WILL RETURN PEER: {self.peers[proxy_id]} @@@@@@@')

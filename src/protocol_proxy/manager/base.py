@@ -4,9 +4,10 @@ import sys
 
 from abc import abstractmethod, ABC
 from importlib import import_module
+from inspect import ismethod
 from typing import Callable, Iterable, Type, TypeVar
 from uuid import uuid4, UUID
-from weakref import WeakValueDictionary
+from weakref import WeakMethod, WeakValueDictionary
 
 from ..ipc import IPCConnector, ProtocolHeaders, ProtocolProxyPeer, SocketParams
 from ..proxy import ProtocolProxy
@@ -23,7 +24,29 @@ class ProtocolProxyManager(IPCConnector, ABC):
         self.unique_ids = {}
         super().__init__(proxy_id=self.get_proxy_id('proxy_manager'), proxy_name=proxy_name, token=uuid4(), **kwargs)
         self.proxy_class = proxy_class
+        # Weak references to ``callback(peer, reason)`` callables, told when a launched proxy is lost (see on_peer_lost).
+        self.peer_lost_callbacks: list = []
         self.register_callback(self.handle_peer_registration, 'REGISTER_PEER', provides_response=True)
+
+    def on_peer_lost(self, callback: Callable[[ProtocolProxyPeer, str], None]):
+        """Call ``callback(peer, reason)`` whenever a proxy this manager launched is lost: its process exited, or it
+        never registered. By then the peer is already removed, so the next ``get_proxy`` for its key launches a fresh
+        process; users typically re-run their setup (``get_proxy`` + ``wait_peer_registered``) from the callback.
+        Bound methods are held weakly, so a user object that goes away is forgotten with it; plain functions are
+        held strongly."""
+        self.peer_lost_callbacks.append(WeakMethod(callback) if ismethod(callback) else (lambda cb=callback: cb))
+
+    def _notify_peer_lost(self, peer: ProtocolProxyPeer, reason: str):
+        live = []
+        for weak in self.peer_lost_callbacks:
+            if (callback := weak()) is None:
+                continue
+            live.append(weak)
+            try:
+                callback(peer, reason)
+            except Exception as e:
+                _log.warning(f'PPM: peer-lost callback {callback} raised for peer {peer.proxy_id}: {e}')
+        self.peer_lost_callbacks = live
 
     @abstractmethod
     def wait_peer_registered(self, peer, timeout, func=None, *args, **kwargs):
