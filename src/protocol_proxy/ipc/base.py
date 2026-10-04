@@ -27,12 +27,10 @@ class ProtocolProxyMessage:
     request_id: int = None
     response_expected: bool = False
     #: The remote this message concerns (see HeadersV2); the receiver dispatches on it when a callback is registered
-    #: for it. None sends a version 1 header.
+    #: for it.
     remote_id: UUID | None = None
-
-    @property
-    def protocol_version(self) -> int:
-        return 2 if self.remote_id is not None else 1
+    #: Header version to send. Version 2 is the default for every message; 1 is for a peer that predates it.
+    protocol_version: int = 2
 
 
 class SocketParams(NamedTuple):

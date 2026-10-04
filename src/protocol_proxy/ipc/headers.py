@@ -83,8 +83,8 @@ class HeadersV2(HeadersV1):
 
     A proxy process serves many remotes, so the sender id alone cannot say which remote a pushed message concerns.
     The remote id is the identifier the caller gave the proxy when it registered the remote; the receiving connector
-    dispatches on ``(method_name, remote_id)`` and falls back to the method-only callback. Messages without a remote id
-    are sent as version 1, so peers that only speak version 1 are unaffected.
+    dispatches on ``(method_name, remote_id)`` and falls back to the method-only callback. Version 2 is the default for
+    every message (``ProtocolProxyMessage.protocol_version``); receivers still accept version 1.
     """
     FORMAT = HeadersV1.FORMAT + '16s'
     HEADER_LENGTH = struct.calcsize(FORMAT)

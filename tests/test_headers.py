@@ -44,9 +44,10 @@ def test_v2_round_trip_with_and_without_remote():
     assert bare.remote_id is None
 
 
-def test_message_picks_the_header_version_from_its_remote():
-    assert ProtocolProxyMessage('M', b'').protocol_version == 1
+def test_messages_default_to_version_2_and_may_opt_down():
+    assert ProtocolProxyMessage('M', b'').protocol_version == 2
     assert ProtocolProxyMessage('M', b'', remote_id=uuid4()).protocol_version == 2
+    assert ProtocolProxyMessage('M', b'', protocol_version=1).protocol_version == 1
 
 
 def test_connector_dispatches_by_remote_then_method():
@@ -69,14 +70,17 @@ def test_connector_dispatches_by_remote_then_method():
     assert p.unregister_callback('PUSH') and p.find_callback(SimpleNamespace(method_name='PUSH', remote_id=None)) is None
 
 
-def test_gevent_sends_v2_only_when_the_message_has_a_remote():
+def test_gevent_sends_the_message_version_with_or_without_a_remote():
     p = gevent_proxy()
     sock = mock.Mock()
     remote = uuid4()
-    p._send_headers(sock, 3, 1, False, 'M', ProtocolProxyMessage('M', b'', remote_id=remote).protocol_version, remote)
-    v2 = sock.send.call_args.args[0]
-    assert v2[:2] == b'\x00\x02' and HeadersV2.unpack(v2[2:]).remote_id == remote
-    p._send_headers(sock, 3, 1, False, 'M')
+    p._send_headers(sock, 3, 1, False, 'M', 2, remote)
+    tagged = sock.send.call_args.args[0]
+    assert tagged[:2] == b'\x00\x02' and HeadersV2.unpack(tagged[2:]).remote_id == remote
+    p._send_headers(sock, 3, 1, False, 'M', 2, None)
+    untagged = sock.send.call_args.args[0]
+    assert untagged[:2] == b'\x00\x02' and HeadersV2.unpack(untagged[2:]).remote_id is None
+    p._send_headers(sock, 3, 1, False, 'M', 1)                                   # opted down for an old peer
     v1 = sock.send.call_args.args[0]
     assert v1[:2] == b'\x00\x01' and len(v1) == 2 + HeadersV1.HEADER_LENGTH
 
@@ -92,7 +96,7 @@ def test_asyncio_frames_dispatch_by_their_own_header_version():
         protocol = IPCProtocol(connector=connector)
         protocol.transport = mock.Mock()
         frames = (protocol._message_to_bytes(ProtocolProxyMessage('PUSH', b'for-a', request_id=1, remote_id=remote))
-                  + protocol._message_to_bytes(ProtocolProxyMessage('PUSH', b'plain', request_id=2)))
+                  + protocol._message_to_bytes(ProtocolProxyMessage('PUSH', b'plain', request_id=2, protocol_version=1)))
         assert frames[:2] == b'\x00\x02'
         buffer = protocol.get_buffer(len(frames))
         buffer[:len(frames)] = frames
