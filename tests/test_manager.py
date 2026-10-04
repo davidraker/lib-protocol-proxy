@@ -139,3 +139,18 @@ class TestSupervision:
         del gone
         manager._notify_peer_lost(mock.Mock(proxy_id=uuid4()), 'why')
         assert user.seen == ['why'] and len(manager.peer_lost_callbacks) == 1
+
+
+class SlowProcess(FakeProcess):
+    """Launching yields, as the real Popen does."""
+    def __init__(self, *args, **kwargs):
+        gevent.sleep(0.01)
+        super().__init__(*args, **kwargs)
+
+
+def test_concurrent_get_proxy_calls_launch_one_process():
+    manager = _manager()
+    with mock.patch('protocol_proxy.manager.gevent.Popen', SlowProcess) as popen, mock.patch('atexit.register'):
+        peers = [g.get() for g in gevent.joinall([gevent.spawn(manager.get_proxy, ('dummy', 'x')) for _ in range(3)])]
+    assert peers[0] is peers[1] is peers[2] and peers[0].process is not None
+    assert len(manager.peers) == 1 and FakeProcess._pids.__next__() - peers[0].process.pid == 1       # one launch

@@ -68,22 +68,29 @@ class GeventProtocolProxyManager(ProtocolProxyManager, GeventIPCConnector, ABC):
         command, proxy_id, proxy_name = self._setup_proxy_process_command(unique_remote_id, **kwargs) # , proxy_env
         #_log.debug(f'@@@@@@@ AFTER SETUP_PROXY_PROCESS_COMMAND: {(command, proxy_id, proxy_name)} @@@@@@@')
         if command:
-            proxy_process = Popen(command, stdin=PIPE, stdout=PIPE, stderr=PIPE)
+            # The peer is registered before the process is launched: launching yields to other greenlets, and a
+            # concurrent get_proxy for the same key must find this peer rather than launch a second process.
+            peer = GeventProtocolProxyPeer(process=None, proxy_id=proxy_id, token=uuid4())
+            self.peers[proxy_id] = peer
+            try:
+                proxy_process = Popen(command, stdin=PIPE, stdout=PIPE, stderr=PIPE)
+            except Exception:
+                if self.peers.get(proxy_id) is peer:
+                    del self.peers[proxy_id]
+                raise
+            peer.process = proxy_process
             _log.info(f'proxy {proxy_name} has PID {proxy_process.pid}')
             spawn(self.log_subprocess_output, proxy_process.stdout)
             spawn(self.log_subprocess_output, proxy_process.stderr)
             # TODO: Ensure that logging as implemented fits with VOLTTRON logging once that is fixed..
             _log.info(f"PPM: Created new ProtocolProxy {proxy_name} with ID {str(proxy_id)}, pid: {proxy_process.pid}")
-            new_peer_token = uuid4()
-            proxy_process.stdin.write(new_peer_token.hex.encode())
+            proxy_process.stdin.write(peer.token.hex.encode())
             proxy_process.stdin.write(self.token.hex.encode())
             proxy_process.stdin.flush()
             proxy_process.stdin.close()
             proxy_process.stdin = open(os.devnull)
-            self.peers[proxy_id] = GeventProtocolProxyPeer(process=proxy_process, proxy_id=proxy_id,
-                                                           token=new_peer_token)
             atexit.register(self._cleanup_proxy_process, proxy_process)
-            spawn(self._watch_proxy_process, proxy_id, self.peers[proxy_id])
+            spawn(self._watch_proxy_process, proxy_id, peer)
             # Do NOT send to the proxy until it has registered and socket_params is set!
             _log.info(f"PPM: Proxy {proxy_id} created, waiting for registration before sending.")
         #_log.debug(f'@@@@@@@ GET_PROXY WILL RETURN PEER: {self.peers[proxy_id]} @@@@@@@')

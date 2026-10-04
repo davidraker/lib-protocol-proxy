@@ -280,6 +280,7 @@ class GeventIPCConnector(IPCConnector):
             #_log.debug('IN SEND SOCKET, WAS ADDED BACK TO OUTBOUND BECAUSE ASYNC_RESULT WAS NOT READY.')
         else:
             payload = message.payload.get() if isinstance(message.payload, Greenlet) else message.payload
+            payload = b'' if payload is None else payload       # a handler that returned nothing still gets its reply out
             self._send_headers(s, len(payload), message.request_id, message.response_expected, message.method_name,
                                message.protocol_version, message.remote_id)
             try:
