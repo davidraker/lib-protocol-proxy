@@ -105,3 +105,38 @@ def test_asyncio_frames_dispatch_by_their_own_header_version():
         await asyncio.sleep(0)
         assert got == [('a', remote, b'for-a'), ('default', None, b'plain')]
     asyncio.run(main())
+
+
+def _feed(protocol, frames: bytes, chunk: int):
+    """Deliver ``frames`` the way asyncio does: into whatever view get_buffer hands out, a chunk at a time."""
+    offset = 0
+    while offset < len(frames):
+        view = protocol.get_buffer(chunk)
+        n = min(len(view), chunk, len(frames) - offset)
+        view[:n] = frames[offset:offset + n]
+        protocol.buffer_updated(n)
+        offset += n
+
+
+def test_asyncio_receives_frames_larger_than_its_buffer_and_across_the_ring_end():
+    """A 100 KB registration payload arrives in 1 KB reads into a 32 KB ring: the buffer grows and the callback gets the
+    whole payload; small frames that straddle the end of the ring are straightened out rather than lost."""
+    async def main():
+        connector = AsyncioIPCConnector(proxy_id=uuid4(), token=uuid4(), proxy_name='c')
+        got = []
+        connector.register_callback(lambda conn, headers, data: got.append((headers.request_id, bytes(data))), 'PUSH')
+        protocol = IPCProtocol(connector=connector)
+        protocol.transport = mock.Mock()
+        big = bytes(range(256)) * 400                                     # 102 400 bytes
+        _feed(protocol, protocol._message_to_bytes(ProtocolProxyMessage('PUSH', big, request_id=1)), 1024)
+        await asyncio.sleep(0)
+        assert got == [(1, big)] and protocol.buffer_size > 32768
+
+        small = IPCProtocol(connector=connector, buffer_size=300)
+        small.transport = mock.Mock()
+        payloads = [bytes([i]) * 100 for i in range(1, 6)]               # 176-byte frames in a 300-byte ring
+        frames = b''.join(small._message_to_bytes(ProtocolProxyMessage('PUSH', p, request_id=10 + i)) for i, p in enumerate(payloads))
+        _feed(small, frames, 50)
+        await asyncio.sleep(0)
+        assert got[1:] == [(10 + i, p) for i, p in enumerate(payloads)]
+    asyncio.run(main())

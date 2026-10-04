@@ -134,54 +134,65 @@ class IPCProtocol(BufferedProtocol):
         self.transport: Transport | None = None
 
     def buffer_updated(self, n_bytes: int) -> None:
+        """Account for ``n_bytes`` just read into the buffer and dispatch every complete frame it now holds.
+
+        The buffer is a ring; a frame that would not fit between the read position and the end of the ring (or in
+        the ring at all) straightens the buffered bytes out to the start first, growing the buffer when the frame is
+        larger than it. Frames are therefore always read from a contiguous slice.
+        """
         try:
-            # TODO: This is probably missing error handling and may not close the transport if it errs?
             if not self.transport:
                 _log.warning(f'{self.connector.proxy_name} -- Unable to locate transport for received buffer.')
             self.tail = (self.tail + n_bytes) % self.buffer_size
             self.count += n_bytes
-            # TODO: How to mitigate the possibility of an overflow?
-            # TODO: This block tested the version of each incoming frame.
-            #  Is this better or worse than assuming version number stays the same?
-            # version_end = 2
-            # if len(self.received_data) > version_end:
-            #     if not (protocol := self.connector.PROTOCOL_VERSION.get(struct.unpack('>H', self.received_data[:2])[0])):
-            #         raise NotImplementedError(f'Unknown protocol version ({protocol.VERSION})'
-            #                                   f' received from: {self.transport.get_extra_info("peer_name")}')
-            #     header_end = version_end + protocol.HEADER_LENGTH
-
-            if self.count < 2:
-                return
-            # Each frame names its own header version (the sender picks version 2 only when it tags a remote).
-            version = struct.unpack('>H', bytes(self.received_data[self.head:self.head + 2]))[0]
-            protocol = self.connector.PROTOCOL_VERSION.get(version)
-            if protocol is None:
-                raise NotImplementedError(f'Unknown protocol version ({version}) received by {self.connector.proxy_name}')
-            header_length = protocol.HEADER_LENGTH + 2
-            if self.count >= header_length:
+            while self.count >= 2:
+                # Each frame names its own header version (the sender picks version 2 only when it tags a remote).
+                if self.head + 2 > self.buffer_size:
+                    self._straighten(self.buffer_size)
+                version = struct.unpack('>H', bytes(self.received_data[self.head:self.head + 2]))[0]
+                protocol = self.connector.PROTOCOL_VERSION.get(version)
+                if protocol is None:
+                    raise NotImplementedError(f'Unknown protocol version ({version}) received by {self.connector.proxy_name}')
+                header_length = protocol.HEADER_LENGTH + 2
+                if self.count < header_length:
+                    return
+                if self.head + header_length > self.buffer_size:
+                    self._straighten(self.buffer_size)
                 header_end = self.head + header_length
-                header_bytes = self.received_data[self.head+2:header_end]
-                headers = protocol.unpack(header_bytes)  # TODO: Should this be in try block?
+                headers = protocol.unpack(self.received_data[self.head + 2:header_end])
+                frame_length = header_length + headers.data_length
+                if self.head + frame_length > self.buffer_size:
+                    self._straighten(frame_length + self.minimum_read_size)
+                    header_end = self.head + header_length
+                if self.count < frame_length:
+                    return
                 message_end = header_end + headers.data_length
-                if self.head + self.count >= message_end:
-                    # TODO: This same wrapping logic is needed for reading headers too! Break into helper function.
-                    if not message_end < self.buffer_size:
-                        message_end = message_end % self.buffer_size
-                        data = self.received_data[header_end:self.buffer_size] + self.received_data[0:message_end]
-                    else:
-                        data = self.received_data[header_end:message_end]
-                    self.head = message_end
-                    self.count -= header_length + headers.data_length
-                    if cb_info := self.connector.find_callback(headers):
-                        self.loop.create_task(self._run_callback(cb_info, headers, data))
-                        if not cb_info.provides_response:
-                            self.transport.close()
-                    else:
+                data = self.received_data[header_end:message_end]
+                self.head = message_end % self.buffer_size
+                self.count -= frame_length
+                if cb_info := self.connector.find_callback(headers):
+                    self.loop.create_task(self._run_callback(cb_info, headers, data))
+                    if not cb_info.provides_response:
                         self.transport.close()
-                        _log.warning(f'{self.connector.proxy_name} -- No callback found for method: {headers.method_name}.')
-
+                else:
+                    self.transport.close()
+                    _log.warning(f'{self.connector.proxy_name} -- No callback found for method: {headers.method_name}.')
         except Exception as e:
-            _log.debug(f'{self.connector.proxy_name} -- Exception in buffer_updated: {e}')
+            _log.warning(f'{self.connector.proxy_name} -- Exception in buffer_updated: {e!r}')
+
+    def _straighten(self, minimum_size: int) -> None:
+        """Move the buffered bytes to the start of a (possibly larger) buffer so the next frame is contiguous."""
+        size = max(minimum_size, self.buffer_size)
+        fresh = bytearray(size)
+        if self.head + self.count <= self.buffer_size:
+            fresh[:self.count] = self.received_data[self.head:self.head + self.count]
+        else:
+            first = self.buffer_size - self.head
+            fresh[:first] = self.received_data[self.head:self.buffer_size]
+            fresh[first:self.count] = self.received_data[0:self.count - first]
+        self.received_data = memoryview(fresh)
+        self.buffer_size = size
+        self.head, self.tail = 0, self.count % size
 
     async def _run_callback(self, callback_info: ProtocolProxyCallback, headers, data):
         try:
