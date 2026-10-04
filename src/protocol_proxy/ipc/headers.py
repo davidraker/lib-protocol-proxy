@@ -12,6 +12,8 @@ class ProtocolHeaders(metaclass=ABCMeta):
     FORMAT = 'Q32sH16s16s'
     HEADER_LENGTH = struct.calcsize(FORMAT)
     VERSION = 0                                     # 2 byte (16 bit) integer (H)
+    #: Which remote (device, outstation, server...) a message concerns; versions before 2 carry none.
+    remote_id: UUID | None = None
 
     @abstractmethod
     def __init__(self, data_length: int, method_name: str, request_id: int, sender_id, sender_token, **kwargs):
@@ -74,3 +76,39 @@ class HeadersV1(ProtocolHeaders):
         sender_id = UUID(bytes=sender_id_bytes)
         sender_token = UUID(bytes=sender_token_bytes)
         return cls(data_length, method, request_id, sender_id, sender_token, response_expected)
+
+
+class HeadersV2(HeadersV1):
+    """Version 1 plus a 16-byte remote id (all zeros when absent).
+
+    A proxy process serves many remotes, so the sender id alone cannot say which remote a pushed message concerns.
+    The remote id is the identifier the caller gave the proxy when it registered the remote; the receiving connector
+    dispatches on ``(method_name, remote_id)`` and falls back to the method-only callback. Messages without a remote id
+    are sent as version 1, so peers that only speak version 1 are unaffected.
+    """
+    FORMAT = HeadersV1.FORMAT + '16s'
+    HEADER_LENGTH = struct.calcsize(FORMAT)
+    VERSION = 2
+    NO_REMOTE = bytes(16)
+
+    def __init__(self, data_length: int, method_name: str, request_id: int, sender_id, sender_token,
+                 response_expected: bool = False, remote_id: UUID | None = None, **kwargs):
+        super(HeadersV2, self).__init__(data_length, method_name, request_id, sender_id, sender_token,
+                                        response_expected, **kwargs)
+        self.remote_id: UUID | None = remote_id
+
+    def pack(self):
+        return super(HeadersV2, self).pack() + struct.pack('>16s', self.remote_id.bytes if self.remote_id else self.NO_REMOTE)
+
+    @classmethod
+    def unpack(cls, header_bytes):
+        (data_length, method_bytes, request_id, sender_id_bytes, sender_token_bytes, bitflags,
+         remote_id_bytes) = struct.unpack('>' + cls.FORMAT, header_bytes)
+        response_expected = cls.bitflag_is_set(cls.RESPONSE_EXPECTED_BIT, bitflags)
+        method = method_bytes.rstrip(b'\x00').decode('utf8')
+        remote_id = None if remote_id_bytes == cls.NO_REMOTE else UUID(bytes=remote_id_bytes)
+        return cls(data_length, method, request_id, UUID(bytes=sender_id_bytes), UUID(bytes=sender_token_bytes),
+                   response_expected, remote_id)
+
+    def __repr__(self):
+        return super(HeadersV2, self).__repr__() + f', remote_id={self.remote_id}'

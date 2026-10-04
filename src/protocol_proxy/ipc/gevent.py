@@ -209,7 +209,7 @@ class GeventIPCConnector(IPCConnector):
     def _receive_socket(self, s: socket):
         #_log.debug(f'{self.proxy_name}: IN RECEIVE SOCKET')
         headers, io_wait_time = self._receive_headers(s)
-        if headers is not None and (cb_info := self.callbacks.get(headers.method_name)):
+        if headers is not None and (cb_info := self.find_callback(headers)):
             remaining = headers.data_length
             buffer = b''
             done = False
@@ -255,11 +255,12 @@ class GeventIPCConnector(IPCConnector):
             s.close()
 
     def _send_headers(self, s: socket, data_length: int, request_id: int, response_expected: bool, method_name: str,
-                      protocol_version: int = 1):
+                      protocol_version: int = 1, remote_id=None):
         if not (protocol := self.PROTOCOL_VERSION.get(protocol_version)):
             raise NotImplementedError(f'Unable to send with unknown proxy protocol version: {protocol_version}')
+        extra = {'remote_id': remote_id} if protocol_version >= 2 else {}
         header_bytes = protocol(data_length, method_name, request_id, self.proxy_id, self.token,
-                                response_expected).pack()
+                                response_expected, **extra).pack()
         try:
             s.send(header_bytes)
         except (OSError, Exception) as e:
@@ -279,7 +280,8 @@ class GeventIPCConnector(IPCConnector):
             #_log.debug('IN SEND SOCKET, WAS ADDED BACK TO OUTBOUND BECAUSE ASYNC_RESULT WAS NOT READY.')
         else:
             payload = message.payload.get() if isinstance(message.payload, Greenlet) else message.payload
-            self._send_headers(s, len(payload), message.request_id, message.response_expected, message.method_name)
+            self._send_headers(s, len(payload), message.request_id, message.response_expected, message.method_name,
+                               message.protocol_version, message.remote_id)
             try:
                 #_log.debug('REACHED SENDALL IN GEVENT IPC SEND')
                 s.sendall(payload)  # TODO: Should we send in chunks and sleep in between?

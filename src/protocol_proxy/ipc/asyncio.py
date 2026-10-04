@@ -2,6 +2,7 @@ import asyncio
 import inspect
 import json # TODO: Should we really be using JSON for error responses. If not, then what?
 import logging
+import struct
 
 from asyncio import BufferedProtocol, Condition, Future, subprocess, Transport
 from asyncio.base_events import Server
@@ -149,10 +150,18 @@ class IPCProtocol(BufferedProtocol):
             #                                   f' received from: {self.transport.get_extra_info("peer_name")}')
             #     header_end = version_end + protocol.HEADER_LENGTH
 
-            if self.count >= self.header_length:
-                header_end = self.head + self.header_length
+            if self.count < 2:
+                return
+            # Each frame names its own header version (the sender picks version 2 only when it tags a remote).
+            version = struct.unpack('>H', bytes(self.received_data[self.head:self.head + 2]))[0]
+            protocol = self.connector.PROTOCOL_VERSION.get(version)
+            if protocol is None:
+                raise NotImplementedError(f'Unknown protocol version ({version}) received by {self.connector.proxy_name}')
+            header_length = protocol.HEADER_LENGTH + 2
+            if self.count >= header_length:
+                header_end = self.head + header_length
                 header_bytes = self.received_data[self.head+2:header_end]
-                headers = self.protocol.unpack(header_bytes)  # TODO: Should this be in try block?
+                headers = protocol.unpack(header_bytes)  # TODO: Should this be in try block?
                 message_end = header_end + headers.data_length
                 if self.head + self.count >= message_end:
                     # TODO: This same wrapping logic is needed for reading headers too! Break into helper function.
@@ -162,8 +171,8 @@ class IPCProtocol(BufferedProtocol):
                     else:
                         data = self.received_data[header_end:message_end]
                     self.head = message_end
-                    self.count -= 2 + self.header_length + headers.data_length
-                    if cb_info := self.connector.callbacks.get(headers.method_name):
+                    self.count -= header_length + headers.data_length
+                    if cb_info := self.connector.find_callback(headers):
                         self.loop.create_task(self._run_callback(cb_info, headers, data))
                         if not cb_info.provides_response:
                             self.transport.close()
@@ -207,9 +216,11 @@ class IPCProtocol(BufferedProtocol):
             _log.warning(f'{self.connector.proxy_name} -- Exception in connection_made: {e}')
 
     def _message_to_bytes(self, message: ProtocolProxyMessage):
-        message_bytes = bytearray(self.protocol(len(message.payload), message.method_name,
-                                                message.request_id, self.connector.proxy_id,
-                                                self.connector.token, message.response_expected).pack())
+        protocol = self.connector.PROTOCOL_VERSION[message.protocol_version]
+        extra = {'remote_id': message.remote_id} if message.protocol_version >= 2 else {}
+        message_bytes = bytearray(protocol(len(message.payload), message.method_name,
+                                           message.request_id, self.connector.proxy_id,
+                                           self.connector.token, message.response_expected, **extra).pack())
         message_bytes.extend(message.payload)  # TODO: Does payload still need to be encoded?
         return message_bytes
 

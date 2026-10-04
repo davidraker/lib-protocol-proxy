@@ -21,7 +21,7 @@ ignore_missing_imports = true
 
 [tool.poetry]
 name = "protocol-proxy"
-version = "2.0.0rc2"
+version = "2.0.0rc3"
 description = "A system for launching and communicating with a proxy application for network communication which runs in a separate process.."
 authors = ["The VOLTTRON Development Team <volttron@pnnl.gov>"]
 license = "Apache-2.0"

@@ -8,7 +8,7 @@ from psutil import net_connections
 from typing import Any, Awaitable, Callable, NamedTuple
 from uuid import UUID
 
-from . import callback, HeadersV1, ProtocolHeaders
+from . import callback, HeadersV1, HeadersV2, ProtocolHeaders
 
 _log = logging.getLogger(__name__)
 
@@ -26,6 +26,13 @@ class ProtocolProxyMessage:
     payload:  bytes | Awaitable[bytes] | Callable[[any], bytes]
     request_id: int = None
     response_expected: bool = False
+    #: The remote this message concerns (see HeadersV2); the receiver dispatches on it when a callback is registered
+    #: for it. None sends a version 1 header.
+    remote_id: UUID | None = None
+
+    @property
+    def protocol_version(self) -> int:
+        return 2 if self.remote_id is not None else 1
 
 
 class SocketParams(NamedTuple):
@@ -51,7 +58,7 @@ class ProtocolProxyPeer(ABC):
 
 
 class IPCConnector(metaclass=ABCMeta):
-    PROTOCOL_VERSION = {1: HeadersV1}
+    PROTOCOL_VERSION = {1: HeadersV1, 2: HeadersV2}
 
     def __init__(self, *, proxy_id: UUID, token: UUID, proxy_name: str = None, inbound_params: SocketParams = None,
                  chunk_size: int = 1024, encrypt: bool = False, min_port: int = 22801, max_port: int = 22899,
@@ -70,6 +77,8 @@ class IPCConnector(metaclass=ABCMeta):
         self.token = token
 
         self.callbacks: dict[str, ProtocolProxyCallback] = {}
+        # Callbacks for one remote: (method_name, remote_id). Looked up first; self.callbacks is the fallback.
+        self.remote_callbacks: dict[tuple[str, UUID], ProtocolProxyCallback] = {}
         self.peers: dict[UUID, ProtocolProxyPeer] = {}
         self.register_callback(self._handle_response, 'RESPONSE')
         self._request_id = cycle(range(1, 65535))
@@ -104,13 +113,37 @@ class IPCConnector(metaclass=ABCMeta):
     def next_request_id(self):
         return next(self._request_id)
 
-    def register_callback(self, cb_method, method_name, provides_response=False, timeout=30.0):
-        if not self.callbacks.get(method_name):
+    def register_callback(self, cb_method, method_name, provides_response=False, timeout=30.0,
+                          remote_id: UUID | None = None):
+        """Register the handler for ``method_name``.
+
+        Without a ``remote_id`` the first registration wins and later ones are confirmations, so a handler shared by
+        many callers must not depend on which of them registered it. With a ``remote_id`` the handler serves messages
+        tagged with that remote (HeadersV2) and replaces any earlier handler for the same pair.
+        """
+        if remote_id is not None:
+            self.remote_callbacks[(method_name, remote_id)] = ProtocolProxyCallback(cb_method, method_name,
+                                                                                     provides_response, timeout=timeout)
+            _log.info(f'{self.proxy_name} registered callback: {method_name} for remote {remote_id}')
+        elif not self.callbacks.get(method_name):
             _log.info(f'{self.proxy_name} registered callback: {method_name}')
             self.callbacks[method_name] = ProtocolProxyCallback(cb_method, method_name, provides_response,
                                                                 timeout=timeout)
         else:
             _log.info(f'{self.proxy_name} confirmed callback: {method_name} is registered.')
+
+    def unregister_callback(self, method_name, remote_id: UUID | None = None) -> bool:
+        """Remove a handler; returns whether one was registered."""
+        if remote_id is not None:
+            return self.remote_callbacks.pop((method_name, remote_id), None) is not None
+        return self.callbacks.pop(method_name, None) is not None
+
+    def find_callback(self, headers: ProtocolHeaders) -> ProtocolProxyCallback | None:
+        """The handler for a received message: the remote's own if the message names one it has, else the method's."""
+        remote_id = getattr(headers, 'remote_id', None)
+        if remote_id is not None and (cb_info := self.remote_callbacks.get((headers.method_name, remote_id))):
+            return cb_info
+        return self.callbacks.get(headers.method_name)
 
     @abstractmethod
     def start(self, *_, **__):
