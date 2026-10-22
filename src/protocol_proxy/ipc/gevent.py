@@ -376,9 +376,12 @@ class GeventIPCConnector(IPCConnector):
                     self._dispatch(conn, headers, payload)
                     break   # per message: one frame, its reply if any, then close (a sender owed no reply fails fast)
         except (OSError, Exception) as e:
-            reason = str(e)
-            if not self._stop:
-                _log.warning(f'{self.proxy_name}: Error serving {conn}: {e}')
+            if conn.closed.is_set():
+                reason = 'closed'       # this side closed it (stop, replacement, or its peer was dropped): not an error
+            else:
+                reason = str(e)
+                if not self._stop:
+                    _log.warning(f'{self.proxy_name}: Error serving {conn}: {e}')
         finally:
             self._drop(conn, reason)
 
@@ -402,7 +405,7 @@ class GeventIPCConnector(IPCConnector):
         if conn.peer_id is not None and (peer := self.peers.get(conn.peer_id)) is not None \
                 and peer.connection is conn:
             peer.connection = None
-            if not self._stop:
+            if not self._stop and reason != 'closed':
                 _log.info(f'{self.proxy_name}: persistent connection to {conn.peer_id} {reason}.')
 
     def _handle_connection(self, sock: socket):
