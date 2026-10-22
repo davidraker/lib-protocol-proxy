@@ -79,6 +79,19 @@ To run a proxy persistently, pass `persistent=True` to `get_proxy` (it reaches t
 both ends apply the same policy). Local proxies stay per-message by default until persistence has run in the
 real-platform matrix for a while.
 
+## Heartbeat and health
+
+The manager sends `PING` (response expected, empty payload) to every registered peer it launched, every
+`heartbeat_interval` seconds (10 by default, 0 disables). A proxy answers with `{"uptime", "remotes", "busy",
+"last_activity"}` (`ProtocolProxy.health_report`, which a protocol may override to report what it serves). Any reply
+marks the peer `healthy`, even the unknown-method error an older proxy returns; no reply within `heartbeat_timeout`
+(5 s) marks it `unhealthy`, and `heartbeat_misses` (3) consecutive misses mark it `lost` and run the same path as a
+process exit: terminate, forget, tell the `on_peer_lost` listeners, relaunch on the next `get_proxy`. The parent-PID
+watch in the proxy and TCP keepalive on persistent connections stay as the cheaper first signals. `manager.health()`
+returns every peer's state (`launching`, `registered`, `healthy`, `unhealthy`, `lost`), last contact, consecutive
+misses, advertised features (`REGISTER_PEER` now carries `"features": ["ping", "log", "set_log_level"]`), pid,
+connection policy and last report.
+
 ## Logging
 
 A proxy launched by a manager logs through one channel: every record is one JSON object per line on **stderr**, with
