@@ -322,3 +322,71 @@ def test_corrupt_compressed_payload_fails_the_request_not_the_connector(pair):
         with pytest.raises(ConnectionError):
             result.get(timeout=2)
     assert request(a, peer_b, 'ECHO', b'fine afterwards') == b'fine afterwards'
+
+
+# ---- encryption ----------------------------------------------------------------------------------------------------
+
+def _share_key(a, b, peer_b):
+    key = a.new_key()
+    peer_b.key = key
+    b.peers[a.proxy_id].key = key
+    return key
+
+
+def test_seal_and_open_authenticate_the_header_and_detect_tampering(pair):
+    from cryptography.exceptions import InvalidTag
+    a, b, peer_b = pair
+    _share_key(a, b, peer_b)
+    message = ProtocolProxyMessage(method_name='M', payload=b'secret ' * 100, request_id=5, response_expected=True)
+    frame = a._frame(message, remote=peer_b)
+    assert b'secret' not in frame
+    version = int.from_bytes(frame[:2], 'big')
+    protocol = a.PROTOCOL_VERSION[version]
+    header_len = 2 + protocol.HEADER_LENGTH
+    headers = protocol.unpack(frame[2:header_len])
+    assert headers.encrypted and headers.data_length == len(frame) - header_len
+    assert b.open_frame(headers, frame[:header_len], frame[header_len:]) == message.payload
+    tampered = bytearray(frame)
+    tampered[2 + 8 + 1] ^= 0x01                                     # flip a bit of the method name in the header
+    with pytest.raises(InvalidTag):
+        b.open_frame(protocol.unpack(bytes(tampered[2:header_len])), bytes(tampered[:header_len]), frame[header_len:])
+    corrupted = bytearray(frame)
+    corrupted[-1] ^= 0x01                                           # and of the tag
+    with pytest.raises(InvalidTag):
+        b.open_frame(headers, frame[:header_len], bytes(corrupted[header_len:]))
+    b.peers[a.proxy_id].key = a.new_key()                           # the wrong key
+    with pytest.raises(InvalidTag):
+        b.open_frame(headers, frame[:header_len], frame[header_len:])
+
+
+def test_encrypted_peers_exchange_in_both_directions_and_refuse_mismatches(pair):
+    a, b, peer_b = pair
+    peer_a = b.peers[a.proxy_id]
+    seen = []
+
+    def echo_noting(ipc, headers, raw):
+        seen.append((headers.encrypted, headers.compressed))
+        return raw
+    b.register_callback(echo_noting, 'NOTE', provides_response=True)
+    a.register_callback(echo_noting, 'NOTE', provides_response=True)
+    assert request(a, peer_b, 'NOTE', b'clear') == b'clear' and seen[-1] == (False, False)
+    _share_key(a, b, peer_b)
+    for persistent in (False, True):
+        peer_b.persistent = peer_a.persistent = persistent
+        assert request(a, peer_b, 'NOTE', b'hidden') == b'hidden' and seen[-1] == (True, False)
+        assert request(b, peer_a, 'NOTE', b'back') == b'back' and seen[-1] == (True, False)
+    peer_b.features = peer_a.features = ('compress',)
+    big = bytes(range(256)) * 400
+    assert request(a, peer_b, 'NOTE', big) == big and seen[-1] == (True, True)      # compressed, then encrypted
+    # b shares a key with a, so a clear-text frame from a is refused (and the request fails).
+    peer_b.key = None
+    result = a.send(peer_b, ProtocolProxyMessage(method_name='NOTE', payload=b'plain', response_expected=True))
+    with pytest.raises(ConnectionError):
+        result.get(timeout=2)
+    # ...and an encrypted frame from a peer b shares no key with is refused too.
+    peer_b.key, peer_a.key = a.new_key(), None
+    result = a.send(peer_b, ProtocolProxyMessage(method_name='NOTE', payload=b'x', response_expected=True))
+    with pytest.raises(ConnectionError):
+        result.get(timeout=2)
+    peer_b.key = None
+    assert request(a, peer_b, 'NOTE', b'clear again') == b'clear again'

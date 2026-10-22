@@ -33,7 +33,7 @@ class ProtocolProxy(IPCConnector, metaclass=abc.ABCMeta):
 
     def __init__(self, *, manager_address: str, manager_port: int, manager_id: UUID,
                  registration_retry_delay: float = 20.0, manager_watch_interval: float = 1.0,
-                 socket_logging: bool = True, **kwargs):
+                 socket_logging: bool = True, key: bytes | None = None, **kwargs):
         """NOTE: Proxy implementations MUST:
             1. Subclass a multitasking subclass of IPCConnector (gevent, asyncio, etc.)
             2. Subclass this "ProtocolProxy" class.
@@ -43,6 +43,11 @@ class ProtocolProxy(IPCConnector, metaclass=abc.ABCMeta):
         """
         #_log.debug('PP: IN INIT.')
         super(ProtocolProxy, self).__init__(**kwargs)
+        # The AEAD key the manager wrote to stdin after the tokens (None: clear text). Flavours put it on their
+        # manager peer, so every frame to and from the manager is encrypted.
+        self.manager_key: bytes | None = key
+        if self.encrypt and key is None:
+            raise ValueError(f'{self.proxy_name}: --encrypt is set but no key was provided on stdin.')
         self.registration_retry_delay: float = registration_retry_delay
         self.manager_params = SocketParams(manager_address, manager_port)
         self.manager = manager_id
@@ -62,7 +67,7 @@ class ProtocolProxy(IPCConnector, metaclass=abc.ABCMeta):
 
     # ---- liveness -------------------------------------------------------------------------------------------------
     #: Advertised in REGISTER_PEER so the manager knows what this proxy answers.
-    FEATURES: ClassVar[tuple[str, ...]] = ('ping', 'log', 'set_log_level', 'compress')
+    FEATURES: ClassVar[tuple[str, ...]] = ('ping', 'log', 'set_log_level', 'compress', 'aead-chacha20poly1305')
 
     def registration_accepted(self, remote: ProtocolProxyPeer, manager_response) -> bool:
         """Read the manager's REGISTER_PEER reply: ``{"registered": true, "features": [...]}`` from a current manager

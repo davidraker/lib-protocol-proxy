@@ -23,7 +23,7 @@ class AsyncioProtocolProxy(AsyncioIPCConnector, ProtocolProxy, ABC):
                                                    registration_retry_delay=registration_retry_delay,
                                                    token=token, proxy_name=proxy_name, **kwargs)
         self.peers[manager_id] = AsyncioProtocolProxyPeer(proxy_id=manager_id, socket_params=self.manager_params,
-                                                          token=manager_token)
+                                                          token=manager_token, key=self.manager_key)
         self.registration_attempts = registration_attempts
         self.registration_timeout = registration_timeout
         self.registered = False

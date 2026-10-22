@@ -4,7 +4,6 @@ import json # TODO: Should we really be using JSON for error responses. If not, 
 import logging
 import socket as _socket
 import struct
-import zlib
 
 from asyncio import BufferedProtocol, Condition, Future, subprocess, Transport
 from asyncio.base_events import Server
@@ -288,12 +287,18 @@ class IPCProtocol(BufferedProtocol):
                     header_end = self.head + header_length
                 if self.count < frame_length:
                     return
+                raw_header = bytes(self.received_data[self.head:header_end])
                 message_end = header_end + headers.data_length
                 data = self.received_data[header_end:message_end]
                 self.head = message_end % self.buffer_size
                 self.count -= frame_length
-                if headers.compressed:
-                    data = memoryview(zlib.decompress(data))
+                try:
+                    data = memoryview(self.connector.open_frame(headers, raw_header, data))
+                except Exception as e:      # refused clear text, no key, failed authentication, corrupt compression
+                    _log.warning(f'{self.connector.proxy_name} -- Dropping {headers.method_name} from'
+                                 f' {headers.sender_id}: {e!r}')
+                    self.transport.close()
+                    return
                 if headers.keep_alive and not self.persistent:
                     self.connector._adopt(self, headers)
                 if headers.method_name == 'RESPONSE':
@@ -372,13 +377,12 @@ class IPCProtocol(BufferedProtocol):
                           remote: ProtocolProxyPeer | None = None):
         protocol = self.connector.PROTOCOL_VERSION[message.protocol_version]
         extra = {'remote_id': message.remote_id} if message.protocol_version >= 2 else {}
-        payload, compressed = self.connector.encode_payload(remote, bytes(message.payload))
-        message_bytes = bytearray(protocol(len(payload), message.method_name,
-                                           message.request_id, self.connector.proxy_id,
-                                           self.connector.token, message.response_expected, keep_alive=keep_alive,
-                                           compressed=compressed, **extra).pack())
-        message_bytes.extend(payload)
-        return message_bytes
+
+        def pack(length, compressed, encrypted):
+            return protocol(length, message.method_name, message.request_id, self.connector.proxy_id,
+                            self.connector.token, message.response_expected, keep_alive=keep_alive,
+                            compressed=compressed, encrypted=encrypted, **extra).pack()
+        return bytearray(self.connector.seal(remote, bytes(message.payload), pack))
 
     def connection_lost(self, exc):
         self._lost = True

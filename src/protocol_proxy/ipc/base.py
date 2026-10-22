@@ -1,5 +1,6 @@
 import json
 import logging
+import os
 import time
 import zlib
 
@@ -66,6 +67,9 @@ class ProtocolProxyPeer(ABC):
     connection: Any = None
     #: What the peer advertised in REGISTER_PEER (``ping``, ``log``, ``set_log_level``, ...).
     features: tuple = ()
+    #: The 32-byte AEAD key shared with this peer, or None for clear text. Fixed for the peer's lifetime: every frame
+    #: between two peers that share a key is encrypted, and a clear-text frame from such a peer is refused.
+    key: bytes | None = None
     #: Liveness as the manager sees it: launching, registered, healthy, unhealthy (missed heartbeats), lost.
     state: str = 'launching'
     last_seen: float | None = None      # time.time() of the last frame or heartbeat reply from this peer
@@ -87,7 +91,10 @@ class IPCConnector(metaclass=ABCMeta):
     #: Payloads larger than this are zlib-compressed toward a peer that advertised ``compress``.
     COMPRESS_THRESHOLD = 4096
     #: What this connector tells its peers it understands (proxies in REGISTER_PEER, the manager in its reply).
-    FEATURES: ClassVar[tuple[str, ...]] = ('compress',)
+    FEATURES: ClassVar[tuple[str, ...]] = ('compress', 'aead-chacha20poly1305')
+    KEY_BYTES = 32
+    NONCE_BYTES = 12
+    TAG_BYTES = 16
 
     def __init__(self, *, proxy_id: UUID, token: UUID, proxy_name: str = None, inbound_params: SocketParams = None,
                  chunk_size: int = 1024, encrypt: bool = False, min_port: int = 22801, max_port: int = 22899,
@@ -168,6 +175,49 @@ class IPCConnector(metaclass=ABCMeta):
         if getattr(headers, 'compressed', False):
             return zlib.decompress(payload)
         return payload
+
+    @staticmethod
+    def _aead(key: bytes):
+        try:
+            from cryptography.hazmat.primitives.ciphers.aead import ChaCha20Poly1305
+        except ImportError as e:    # pragma: no cover - cryptography is a dependency
+            raise RuntimeError('Encrypted IPC needs the "cryptography" package.') from e
+        return ChaCha20Poly1305(key)
+
+    @classmethod
+    def new_key(cls) -> bytes:
+        return os.urandom(cls.KEY_BYTES)
+
+    def seal(self, remote: ProtocolProxyPeer | None, payload: bytes, pack_header: Callable[[int, bool, bool], bytes]) -> bytes:
+        """The wire frame of ``payload`` toward ``remote``: compressed when the peer takes it, then encrypted when a
+        key is shared with it. ``pack_header(data_length, compressed, encrypted)`` returns the header bytes (version
+        word included); for an encrypted frame those bytes are the associated data, so the method name, request id,
+        sender, remote and flags cannot be altered or moved onto another message without detection."""
+        payload, compressed = self.encode_payload(remote, payload)
+        key = remote.key if remote is not None else None
+        if key is None:
+            return pack_header(len(payload), compressed, False) + payload
+        header = pack_header(len(payload) + self.NONCE_BYTES + self.TAG_BYTES, compressed, True)
+        nonce = os.urandom(self.NONCE_BYTES)
+        return header + nonce + self._aead(key).encrypt(nonce, payload, header)
+
+    def open_frame(self, headers: ProtocolHeaders, raw_header: bytes, payload: bytes) -> bytes:
+        """The payload as the sender had it: decrypted (and authenticated against ``raw_header``) when the frame is
+        encrypted, then decompressed. Refuses a clear-text frame from a peer this side shares a key with, and an
+        encrypted frame from one it does not (``PermissionError``); a forged or corrupted frame fails authentication
+        (``cryptography.exceptions.InvalidTag``)."""
+        peer = self.peers.get(getattr(headers, 'sender_id', None))
+        key = peer.key if peer is not None else None
+        if getattr(headers, 'encrypted', False):
+            if key is None:
+                raise PermissionError(f'encrypted {headers.method_name} from {headers.sender_id}, with whom no key is shared')
+            if len(payload) < self.NONCE_BYTES + self.TAG_BYTES:
+                raise PermissionError(f'encrypted {headers.method_name} from {headers.sender_id} is too short')
+            nonce, body = bytes(payload[:self.NONCE_BYTES]), bytes(payload[self.NONCE_BYTES:])
+            payload = self._aead(key).decrypt(nonce, body, bytes(raw_header))
+        elif key is not None:
+            raise PermissionError(f'clear-text {headers.method_name} from {headers.sender_id}, who must encrypt')
+        return self.decode_payload(headers, payload)
 
     def is_persistent(self, remote: ProtocolProxyPeer) -> bool:
         """Whether new connections toward this peer are kept open (the peer's own policy, else this connector's)."""

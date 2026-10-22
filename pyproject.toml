@@ -43,6 +43,7 @@ classifiers = [
 python = ">=3.10,<4.0"
 gevent = ">=24.2.1"
 psutil = ">=5.9.0"
+cryptography = ">=42"
 
 [tool.poetry.group.dev.dependencies]
 pytest = "^8.0.0"

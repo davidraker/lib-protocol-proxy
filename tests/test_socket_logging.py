@@ -11,6 +11,8 @@ from types import SimpleNamespace
 import gevent
 import pytest
 
+from protocol_proxy.proxy import ProtocolProxy
+
 from protocol_proxy import logs
 from protocol_proxy.logs import SocketLogHandler, handle_log_batch, record_from_fields
 from protocol_proxy.manager.gevent import GeventProtocolProxyManager
@@ -179,7 +181,7 @@ def test_real_proxy_logs_by_stderr_then_socket_then_stderr_at_exit(proxy_class_n
         _wait(lambda: peer.state == 'healthy', what='a heartbeat reply from the real proxy')
         health = manager.health()["('dummy', 'x')"]
         assert health['pid'] == peer.process.pid and health['report']['uptime'] > 0
-        assert health['features'] == ['ping', 'log', 'set_log_level', 'compress'] and peer.features == tuple(health['features'])
+        assert health['features'] == list(ProtocolProxy.FEATURES) and peer.features == tuple(health['features'])
         reply = manager.set_proxy_log_level(peer, 'DEBUG').get(timeout=5)
         assert json.loads(reply) == {'level': 'DEBUG'}
         _wait(lambda: any(r.levelno == logging.DEBUG and r.getMessage().startswith('debug tick') for r in by_socket()),
@@ -188,6 +190,37 @@ def test_real_proxy_logs_by_stderr_then_socket_then_stderr_at_exit(proxy_class_n
         assert peer.process.returncode == 0
         _wait(lambda: any(r.channel == 'stderr' and 'stopping' in r.getMessage() for r in proxies_log),
               what='the stop record flushed to stderr at exit')
+    finally:
+        if peer is not None and peer.process is not None and peer.process.poll() is None:
+            peer.process.kill()
+        if manager._heartbeat is not None:
+            manager._heartbeat.kill()
+        manager.stop()
+        gevent.joinall([loop], timeout=2)
+
+
+def test_real_proxy_launched_with_encryption_exchanges_only_encrypted_frames(proxies_log, monkeypatch):
+    from unittest import mock
+    tests_dir = str(Path(__file__).resolve().parent)
+    monkeypatch.setenv('PYTHONPATH', os.pathsep.join(filter(None, [tests_dir, os.environ.get('PYTHONPATH')])))
+    import dummy_proxies as dummies
+    manager = GeventProtocolProxyManager(proxy_class=dummies.AsyncioDummy, encrypt=True, heartbeat_interval=0.3)
+    manager.start()
+    loop = gevent.spawn(manager.select_loop)
+    peer = None
+    try:
+        with mock.patch.object(manager, 'open_frame', wraps=manager.open_frame) as opened:
+            peer = manager.get_proxy(('dummy', 'enc'))
+            assert len(peer.key) == 32
+            manager.wait_peer_registered(peer, 20)
+            assert peer.socket_params is not None, 'encrypted proxy did not register'
+            _wait(lambda: peer.state == 'healthy', what='an encrypted heartbeat reply')
+            reply = manager.set_proxy_log_level(peer, 'WARNING').get(timeout=5)
+            assert json.loads(reply) == {'level': 'WARNING'}
+            _wait(lambda: any(r.channel == 'socket' for r in proxies_log), what='a LOG batch over the socket')
+        assert opened.call_count >= 3 and all(call.args[0].encrypted for call in opened.call_args_list)
+        manager._cleanup_proxy_process(peer.process)
+        assert peer.process.returncode == 0
     finally:
         if peer is not None and peer.process is not None and peer.process.poll() is None:
             peer.process.kill()

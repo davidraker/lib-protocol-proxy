@@ -95,7 +95,8 @@ class GeventProtocolProxyManager(ProtocolProxyManager, GeventIPCConnector, ABC):
             # The peer is registered before the process is launched: launching yields to other greenlets, and a
             # concurrent get_proxy for the same key must find this peer rather than launch a second process.
             peer = GeventProtocolProxyPeer(process=None, proxy_id=proxy_id, token=uuid4(), name=proxy_name,
-                                           persistent=self.peer_policy(kwargs))
+                                           persistent=self.peer_policy(kwargs),
+                                           key=self.new_key() if self.peer_encrypted(kwargs) else None)
             self.peers[proxy_id] = peer
             try:
                 proxy_process = Popen(command, stdin=PIPE, stdout=PIPE, stderr=PIPE, env=self.proxy_environment())
@@ -112,6 +113,8 @@ class GeventProtocolProxyManager(ProtocolProxyManager, GeventIPCConnector, ABC):
             _log.info(f"PPM: Created new ProtocolProxy {proxy_name} with ID {str(proxy_id)}, pid: {proxy_process.pid}")
             proxy_process.stdin.write(peer.token.hex.encode())
             proxy_process.stdin.write(self.token.hex.encode())
+            if peer.key is not None:
+                proxy_process.stdin.write(peer.key.hex().encode())
             proxy_process.stdin.flush()
             proxy_process.stdin.close()
             proxy_process.stdin = open(os.devnull)

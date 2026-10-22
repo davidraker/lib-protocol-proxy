@@ -79,6 +79,20 @@ To run a proxy persistently, pass `persistent=True` to `get_proxy` (it reaches t
 both ends apply the same policy). Local proxies stay per-message by default until persistence has run in the
 real-platform matrix for a while.
 
+## Encryption
+
+A manager launched with `encrypt=True` (or a proxy requested with `get_proxy(..., encrypt=True)`) generates a 32-byte
+key per proxy and writes it, as hex, to the proxy's stdin after the two tokens; the proxy is launched with
+`--encrypt True` and refuses to start if no key follows the tokens. Nothing secret is on the command line. From then
+on every frame between the two, registration included, is ChaCha20-Poly1305: header bit 2 is set, the payload on the
+wire is a 12-byte random nonce, the ciphertext and the 16-byte tag (`data_length` counts those bytes), and the whole
+header, version word through `remote_id`, is the associated data, so the method name, request id, sender, remote and
+flags cannot be altered or replayed onto another message without detection. Compression, when it applies, happens
+before encryption. The mode is fixed per peer: a receiver refuses a clear-text frame from a peer it shares a key with
+and an encrypted frame from one it does not; the refused request fails (or the connection is dropped) and nothing
+else is affected. Peers advertise `aead-chacha20poly1305` in their features. Keys live for the proxy's lifetime; a
+relaunch gets a fresh one. TLS for remote peers is a separate, later step.
+
 ## Compression
 
 A payload larger than `compress_threshold` bytes (4096 by default; `--compress-threshold` on a proxy, 0 compresses

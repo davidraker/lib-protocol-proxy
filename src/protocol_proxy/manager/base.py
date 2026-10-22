@@ -80,6 +80,8 @@ class ProtocolProxyManager(IPCConnector, ABC):
             kwargs = {k: v for k, v in kwargs.items() if k != 'manager_callbacks' and v is not None}
             # The proxy logs at the level this manager would handle its records at, unless the caller chose one.
             kwargs.setdefault('log_level', logging.getLevelName(self.proxy_logger(proxy_name).getEffectiveLevel()))
+            if self.encrypt:
+                kwargs.setdefault('encrypt', True)      # the proxy must read the key the manager writes to stdin
             protocol_specific_params = [i for pair in [(f"--{k.replace('_', '-')}", str(v))
                                                        for k, v in kwargs.items()] for i in pair]
             # Launched through the generic entry point so the proxy module is imported exactly once (see launch.main).
@@ -252,6 +254,12 @@ class ProtocolProxyManager(IPCConnector, ABC):
             if proxy_id in manager.peers:
                 return manager, manager.peers[proxy_id]
         return None, None
+
+    def peer_encrypted(self, kwargs: dict) -> bool:
+        """Whether a proxy launched with these options gets an AEAD key: the ``encrypt`` kwarg when given (it travels
+        to the proxy as ``--encrypt``), else this manager's own ``encrypt`` setting."""
+        value = kwargs.get('encrypt')
+        return self.encrypt if value is None else str2bool(value)
 
     @staticmethod
     def peer_policy(kwargs: dict) -> bool | None:

@@ -51,7 +51,7 @@ def test_command_line_log_level_follows_the_proxy_logger_unless_given():
 
 def test_launched_process_gets_the_manager_marker_in_its_environment():
     manager = _manager()
-    with mock.patch('protocol_proxy.manager.gevent.Popen', FakeProcess) as popen, mock.patch('atexit.register'):
+    with mock.patch('protocol_proxy.manager.gevent.Popen', FakeProcess), mock.patch('atexit.register'):
         manager.get_proxy(('dummy', 'x'))
     env = FakeProcess.last_kwargs['env']
     assert env['_LAUNCHED_BY_PROXY_MANAGER'] == '1' and env['PATH'] == os.environ['PATH']
@@ -67,16 +67,26 @@ def test_class_get_proxy_pops_manager_callbacks():
         manager.get_proxy.assert_called_once_with(('mqtt', 'h'), host='h')
 
 
+class _RecordingStdin(io.BytesIO):
+    """What the manager writes to the child's stdin stays readable after close (as FakeProcess.last_stdin)."""
+    def close(self):
+        FakeProcess.last_stdin = self.getvalue()
+        super().close()
+
+
 class FakeProcess:
     """A launched proxy process that exits when the test says so."""
     _pids = iter(range(1000, 2000))
 
     last_kwargs: dict = {}
+    last_args: tuple = ()
+    last_stdin: bytes = b''
 
     def __init__(self, *args, **kwargs):
         FakeProcess.last_kwargs = kwargs
+        FakeProcess.last_args = args
         self.pid = next(self._pids)
-        self.stdin = io.BytesIO()
+        self.stdin = _RecordingStdin()
         self.stdout, self.stderr = io.BytesIO(b''), io.BytesIO(b'')
         self.returncode = None
         self._exited = Event()
@@ -204,3 +214,22 @@ def test_registration_wakes_the_waiter_at_once():
         elapsed = time.monotonic() - started
     assert ran == [1] and peer.socket_params == SocketParams('127.0.0.1', 5) and peer.registered.is_set()
     assert 0.04 < elapsed < 0.5, elapsed
+
+
+def test_encrypting_manager_writes_a_key_after_the_tokens_and_passes_the_option():
+    manager = GeventProtocolProxyManager(proxy_class=DummyProxy, encrypt=True)
+    manager.inbound_params = SocketParams('127.0.0.1', 22801)
+    with mock.patch('protocol_proxy.manager.gevent.Popen', FakeProcess), mock.patch('atexit.register'):
+        peer = manager.get_proxy(('dummy', 'x'))
+    assert len(peer.key) == 32
+    written = FakeProcess.last_stdin
+    assert written == (peer.token.hex + manager.token.hex + peer.key.hex()).encode()
+    command = FakeProcess.last_args[0]
+    assert command[command.index('--encrypt') + 1] == 'True'
+    plain = GeventProtocolProxyManager(proxy_class=DummyProxy)
+    plain.inbound_params = SocketParams('127.0.0.1', 22801)
+    with mock.patch('protocol_proxy.manager.gevent.Popen', FakeProcess), mock.patch('atexit.register'):
+        peer = plain.get_proxy(('dummy', 'y'))
+        assert peer.key is None and len(FakeProcess.last_stdin) == 64 and '--encrypt' not in FakeProcess.last_args[0]
+        peer = plain.get_proxy(('dummy', 'z'), encrypt=True)      # per proxy
+        assert len(peer.key) == 32 and len(FakeProcess.last_stdin) == 128

@@ -13,6 +13,7 @@ from protocol_proxy.ipc import callback, async_callback, ProtocolProxyPeer, Sock
 from protocol_proxy.ipc.asyncio import AsyncioIPCConnector
 from protocol_proxy.ipc.gevent import GeventIPCConnector
 from protocol_proxy.proxy.asyncio import AsyncioProtocolProxy
+from protocol_proxy.proxy import ProtocolProxy
 from protocol_proxy.proxy.gevent import GeventProtocolProxy
 
 
@@ -220,4 +221,4 @@ def test_registration_reply_from_a_current_manager_records_its_features():
     assert p.registration_accepted(manager_peer, b'{"status": "error", "error": "x"}') is False
     assert p.registration_accepted(manager_peer, b'garbage') is False
     p.inbound_server_socket = mock.Mock(getsockname=lambda: ('127.0.0.1', 5))
-    assert json.loads(p._get_registration_message().payload)['features'] == ['ping', 'log', 'set_log_level', 'compress']
+    assert json.loads(p._get_registration_message().payload)['features'] == list(ProtocolProxy.FEATURES)

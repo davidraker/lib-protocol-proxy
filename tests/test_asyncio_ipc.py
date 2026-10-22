@@ -274,3 +274,27 @@ def test_compression_is_negotiated_per_peer_and_round_trips():
                 assert await request(a, peer_b, 'NOTE', b'tiny') == b'tiny' and seen[-1] is False
         await stop_all(a, b)
     asyncio.run(main())
+
+
+def test_encrypted_exchange_and_refusal_of_clear_text():
+    async def main():
+        a, b, peer_a, peer_b = await make_pair()
+        seen = []
+
+        def echo_noting(ipc, headers, raw):
+            seen.append(headers.encrypted)
+            return raw
+        b.register_callback(echo_noting, 'NOTE', provides_response=True)
+        a.register_callback(echo_noting, 'NOTE', provides_response=True)
+        peer_b.key = peer_a.key = a.new_key()
+        for persistent in (False, True):
+            peer_b.persistent = peer_a.persistent = persistent
+            assert await request(a, peer_b, 'NOTE', b'hidden') == b'hidden' and seen[-1] is True
+            assert await request(b, peer_a, 'NOTE', b'back') == b'back' and seen[-1] is True
+        peer_b.key = None                                           # a now sends clear text; b still expects a key
+        peer_b.persistent = peer_a.persistent = False
+        result = await a.send(peer_b, ProtocolProxyMessage(method_name='NOTE', payload=b'plain', response_expected=True))
+        with pytest.raises(ConnectionError):
+            await asyncio.wait_for(result, 2)
+        await stop_all(a, b)
+    asyncio.run(main())

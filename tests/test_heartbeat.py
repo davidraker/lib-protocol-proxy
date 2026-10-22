@@ -6,6 +6,8 @@ from uuid import uuid4
 
 import gevent
 import pytest
+
+from protocol_proxy.proxy import ProtocolProxy
 from gevent import sleep
 
 from protocol_proxy.ipc.gevent import GeventProtocolProxyPeer
@@ -56,7 +58,7 @@ def test_ping_reply_carries_the_health_report(pair):
     reply = json.loads(manager.send(peer, manager.ping_message()).get(timeout=2))
     assert reply['uptime'] >= 0 and reply['remotes'] == 0 and reply['busy'] is False
     assert reply['last_activity'] is not None                 # the registration reply was activity
-    assert peer.features == ('ping', 'log', 'set_log_level', 'compress')
+    assert peer.features == ProtocolProxy.FEATURES
 
 
 def test_heartbeat_marks_a_live_peer_healthy_and_reports_it(pair):
@@ -65,7 +67,7 @@ def test_heartbeat_marks_a_live_peer_healthy_and_reports_it(pair):
     _wait(lambda: peer.state == 'healthy')
     assert peer.missed == 0 and peer.health['uptime'] >= 0 and peer.last_seen is not None
     report = manager.health()['inproc']
-    assert report['state'] == 'healthy' and report['features'] == ['ping', 'log', 'set_log_level', 'compress']
+    assert report['state'] == 'healthy' and report['features'] == list(ProtocolProxy.FEATURES)
     assert report['pid'] == peer.process.pid and report['report'] is peer.health and report['persistent'] is False
 
 

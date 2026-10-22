@@ -104,7 +104,8 @@ def test_proxy_logger_name_is_logger_safe():
 def test_logging_writer_buffers_lines_and_blocks(collected):
     logger = logging.getLogger(LOGGER)
     writer = LoggingWriter(logger, logging.INFO, wrapped=sys.__stdout__, name='stdout')
-    writer.write('partial'); writer.write(' line\nsecond\n\nthird')
+    writer.write('partial')
+    writer.write(' line\nsecond\n\nthird')
     assert [r.getMessage() for r in collected] == ['partial line', 'second']         # blank lines are dropped
     writer.flush()
     assert collected[-1].getMessage() == 'third' and collected[-1].pathname == '<stdout>'
@@ -162,7 +163,8 @@ raise RuntimeError('uncaught')
 
 def _run_child(mode: str, collected: list, level: str = 'INFO', env_marker: bool = True):
     env = {**os.environ, 'PYTHONPATH': os.pathsep.join(sys.path)}
-    env.pop('PROTOCOL_PROXY_LOG', None); env.pop('PROTOCOL_PROXY_LOG_LEVEL', None)
+    env.pop('PROTOCOL_PROXY_LOG', None)
+    env.pop('PROTOCOL_PROXY_LOG_LEVEL', None)
     if env_marker:
         env['_LAUNCHED_BY_PROXY_MANAGER'] = '1'
     process = subprocess.Popen([sys.executable, '-c', CHILD, level, mode], env=env, stdout=subprocess.PIPE,

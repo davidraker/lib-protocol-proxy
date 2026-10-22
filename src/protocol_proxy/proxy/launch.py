@@ -46,7 +46,8 @@ def proxy_command_parser(parser: ArgumentParser = None):
     parser.add_argument('--manager-port', type=int, default=22801,
                         help='Port of the outbound socket to the Proxy Manager.')
     parser.add_argument('--encrypt', type=str2bool, default=False,
-                        help='Whether to use encryption on the socket connections with the Manager.')
+                        help='Encrypt every frame to and from the manager (ChaCha20-Poly1305) with the key the manager'
+                             ' writes to stdin after the tokens. The manager passes the policy it applies itself.')
     parser.add_argument('--inbound-address', type=str, default='localhost',
                         help='Address of the inbound socket from the Proxy Manager')
     parser.add_argument('--inbound-port', type=int, default=None,
@@ -66,13 +67,24 @@ def proxy_command_parser(parser: ArgumentParser = None):
     return parser
 
 
-def _read_tokens() -> tuple[UUID, UUID]:
-    """The manager writes the proxy token followed by its own token, as hex, to the proxy's stdin."""
+KEY_HEX_LENGTH = 64
+
+
+def _read_tokens(encrypt: bool = False) -> tuple[UUID, UUID, bytes | None]:
+    """The manager writes the proxy token followed by its own token, as hex, to the proxy's stdin, and after them the
+    32-byte AEAD key (hex) when the proxy is launched with ``--encrypt``. Nothing secret is on the command line."""
     data = sys.stdin.buffer.read(2 * TOKEN_HEX_LENGTH)
     if len(data) != 2 * TOKEN_HEX_LENGTH:
         raise ValueError(f'Expected {2 * TOKEN_HEX_LENGTH} hex characters (proxy token + manager token) on stdin,'
                          f' got {len(data)} bytes. Proxies are meant to be launched by a ProtocolProxyManager.')
-    return UUID(hex=data[:TOKEN_HEX_LENGTH].decode('utf8')), UUID(hex=data[TOKEN_HEX_LENGTH:].decode('utf8'))
+    tokens = UUID(hex=data[:TOKEN_HEX_LENGTH].decode('utf8')), UUID(hex=data[TOKEN_HEX_LENGTH:].decode('utf8'))
+    if not encrypt:
+        return *tokens, None
+    key_hex = sys.stdin.buffer.read(KEY_HEX_LENGTH)
+    if len(key_hex) != KEY_HEX_LENGTH:
+        raise ValueError(f'--encrypt is set but no {KEY_HEX_LENGTH // 2}-byte key followed the tokens on stdin'
+                         f' (got {len(key_hex)} bytes).')
+    return *tokens, bytes.fromhex(key_hex.decode('utf8'))
 
 
 def launch(launcher_func: Callable, argv: list[str] | None = None) -> int:
@@ -91,11 +103,11 @@ def launch(launcher_func: Callable, argv: list[str] | None = None) -> int:
     opts['inbound_params'] = SocketParams(inbound_address, inbound_port) if inbound_port else None
     _log.info(f'Launching Proxy with parameters: {redact(opts)}')
     try:
-        proxy_token, manager_token = _read_tokens()
+        proxy_token, manager_token, key = _read_tokens(bool(opts.get('encrypt')))
         if iscoroutinefunction(proxy_runner):
-            result = run(proxy_runner(token=proxy_token, manager_token=manager_token, **opts))
+            result = run(proxy_runner(token=proxy_token, manager_token=manager_token, key=key, **opts))
         else:
-            result = proxy_runner(token=proxy_token, manager_token=manager_token, **opts)
+            result = proxy_runner(token=proxy_token, manager_token=manager_token, key=key, **opts)
     except KeyboardInterrupt:
         _log.info('Proxy Launch: interrupted.')
         return 0

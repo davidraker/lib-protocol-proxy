@@ -37,13 +37,32 @@ def test_json_formatter_roundtrips_quotes_through_manager_reader():
     assert rebuilt.lineno == 12 and rebuilt.created == record.created
 
 
-def test_read_tokens():
-    a, b = uuid4(), uuid4()
+def test_read_tokens_and_optional_key():
+    a, b, key = uuid4(), uuid4(), bytes(range(32))
     with mock.patch.object(launch_module.sys, 'stdin', mock.Mock(buffer=io.BytesIO((a.hex + b.hex).encode()))):
-        assert _read_tokens() == (a, b)
+        assert _read_tokens() == (a, b, None)
     with mock.patch.object(launch_module.sys, 'stdin', mock.Mock(buffer=io.BytesIO(b'short'))):
         with pytest.raises(ValueError):
             _read_tokens()
+    with mock.patch.object(launch_module.sys, 'stdin', mock.Mock(buffer=io.BytesIO((a.hex + b.hex + key.hex()).encode()))):
+        assert _read_tokens(encrypt=True) == (a, b, key)
+    with mock.patch.object(launch_module.sys, 'stdin', mock.Mock(buffer=io.BytesIO((a.hex + b.hex).encode()))):
+        with pytest.raises(ValueError, match='no 32-byte key'):
+            _read_tokens(encrypt=True)                              # --encrypt without a key is an error
+
+
+def test_launch_passes_the_key_to_the_runner_when_encrypting():
+    seen = {}
+
+    def runner(**kwargs):
+        seen.update(kwargs)
+        return 0
+    a, b, key = uuid4(), uuid4(), bytes(range(32))
+    stdin = io.BytesIO((a.hex + b.hex + key.hex()).encode())
+    code, *_ = _launch_with(BASE_ARGS + ['--encrypt', 'True'], runner, stdin=stdin)
+    assert code == 0 and seen['key'] == key and seen['encrypt'] is True
+    code, *_ = _launch_with(BASE_ARGS + ['--encrypt', 'True'], runner, stdin=io.BytesIO((a.hex + b.hex).encode()))
+    assert code == 1                                                # no key: the launch fails, nothing runs
 
 
 def test_parser_defaults_and_bool_handling():

@@ -32,7 +32,7 @@ class GeventProtocolProxy(GeventIPCConnector, ProtocolProxy, ABC):
                                                   manager_id=manager_id,
                                                   registration_retry_delay=registration_retry_delay, **kwargs)
         self.peers[manager_id] = GeventProtocolProxyPeer(proxy_id=manager_id, socket_params=self.manager_params,
-                                                         token=manager_token)
+                                                         token=manager_token, key=self.manager_key)
         self.registration_attempts = registration_attempts
         self.registration_timeout = registration_timeout
         self.registered = False

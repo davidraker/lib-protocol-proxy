@@ -256,12 +256,12 @@ class GeventIPCConnector(IPCConnector):
 
     def _pack_headers(self, data_length: int, request_id: int, response_expected: bool, method_name: str,
                       protocol_version: int = 1, remote_id=None, keep_alive: bool = False,
-                      compressed: bool = False) -> bytes:
+                      compressed: bool = False, encrypted: bool = False) -> bytes:
         if not (protocol := self.PROTOCOL_VERSION.get(protocol_version)):
             raise NotImplementedError(f'Unable to send with unknown proxy protocol version: {protocol_version}')
         extra = {'remote_id': remote_id} if protocol_version >= 2 else {}
         return protocol(data_length, method_name, request_id, self.proxy_id, self.token, response_expected,
-                        keep_alive=keep_alive, compressed=compressed, **extra).pack()
+                        keep_alive=keep_alive, compressed=compressed, encrypted=encrypted, **extra).pack()
 
     def _frame(self, message: ProtocolProxyMessage, keep_alive: bool = False,
                remote: ProtocolProxyPeer | None = None) -> bytes:
@@ -271,9 +271,9 @@ class GeventIPCConnector(IPCConnector):
         if isinstance(payload, (AsyncResult, Greenlet)):
             payload = payload.get()
         payload = b'' if payload is None else bytes(payload)    # a handler that returned nothing still gets its reply out
-        payload, compressed = self.encode_payload(remote, payload)
-        return self._pack_headers(len(payload), message.request_id, message.response_expected, message.method_name,
-                                  message.protocol_version, message.remote_id, keep_alive, compressed) + payload
+        return self.seal(remote, payload, lambda length, compressed, encrypted: self._pack_headers(
+            length, message.request_id, message.response_expected, message.method_name, message.protocol_version,
+            message.remote_id, keep_alive, compressed, encrypted))
 
     # ---- receiving -----------------------------------------------------------------------------------------------
     def _recv_exact(self, sock: socket, length: int) -> bytes | None:
@@ -302,7 +302,7 @@ class GeventIPCConnector(IPCConnector):
             _log.warning(f'{self.proxy_name}: {self._peer_name(sock)} closed the connection inside the payload of'
                          f' {headers.method_name} (request_id: {headers.request_id}).')
             return None
-        return headers, self.decode_payload(headers, payload)
+        return headers, self.open_frame(headers, version_bytes + header_bytes, payload)
 
     def _dispatch(self, conn: GeventConnection, headers: ProtocolHeaders, payload: bytes):
         """Run the handler for a frame and, if the handler provides a response, write it back on the same connection.

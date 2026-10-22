@@ -180,3 +180,13 @@ def test_compressed_bit_round_trips_independently_of_the_others():
         both = cls.unpack(cls(3, 'M', 7, sender, token, response_expected=True, keep_alive=True, compressed=True).pack()[2:])
         assert both.compressed and both.keep_alive and both.response_expected
     assert HeadersV1.COMPRESSED_BIT == 1
+
+
+def test_encrypted_bit_round_trips():
+    from uuid import uuid4
+    from protocol_proxy.ipc import HeadersV1, HeadersV2
+    sender, token = uuid4(), uuid4()
+    for cls in (HeadersV1, HeadersV2):
+        headers = cls.unpack(cls(3, 'M', 7, sender, token, encrypted=True, compressed=True).pack()[2:])
+        assert headers.encrypted and headers.compressed and not headers.keep_alive
+    assert HeadersV1.ENCRYPTED_BIT == 2

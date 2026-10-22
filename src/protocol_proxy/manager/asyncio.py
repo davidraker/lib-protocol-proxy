@@ -90,13 +90,16 @@ class AsyncioProtocolProxyManager(ProtocolProxyManager, AsyncioIPCConnector, ABC
                                                                  stream_name, proxy_process.pid, proxy_name))
             _log.info(f"PPM: Created new ProtocolProxy {proxy_name} with ID {str(proxy_id)}, pid: {proxy_process.pid}")
             peer_token = uuid4()
+            key = self.new_key() if self.peer_encrypted(kwargs) else None
             proxy_process.stdin.write(peer_token.hex.encode())
             proxy_process.stdin.write(self.token.hex.encode())
+            if key is not None:
+                proxy_process.stdin.write(key.hex().encode())
             await proxy_process.stdin.drain()
             proxy_process.stdin.close()
             proxy_process.stdin = None
             self.peers[proxy_id] = AsyncioProtocolProxyPeer(process=proxy_process, proxy_id=proxy_id, token=peer_token,
-                                                            name=proxy_name, persistent=self.peer_policy(kwargs))
+                                                            name=proxy_name, persistent=self.peer_policy(kwargs), key=key)
             self._setup_exit(proxy_process)
             atexit.register(self.finalize_process, proxy_process)
             self.start_heartbeat()
