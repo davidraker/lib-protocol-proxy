@@ -134,8 +134,9 @@ class ProtocolProxyManager(IPCConnector, ABC):
             proxy.socket_params = SocketParams(address=address, port=port)
             proxy.features = tuple(message.get('features') or ())
             proxy.mark_registered()
-            _log.info(f'PPM: Successfully registered peer: {proxy.proxy_id} @ {proxy.socket_params}')
-            return json.dumps(True).encode('utf8')
+            _log.info(f'PPM: Successfully registered peer: {proxy.proxy_id} @ {proxy.socket_params}'
+                      f' (features: {", ".join(proxy.features) or "none"})')
+            return json.dumps({'registered': True, 'features': list(self.FEATURES)}).encode('utf8')
         else:  # TODO: Is there any reasonable situation where this runs and returns false?
             _log.error(f'PPM: Failed to register peer: {proxy.proxy_id} with message: {message}.')
             return json.dumps(False).encode('utf8')

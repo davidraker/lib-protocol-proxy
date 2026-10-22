@@ -54,6 +54,9 @@ def proxy_command_parser(parser: ArgumentParser = None):
     parser.add_argument('--persistent', type=str2bool, default=False,
                         help='Keep one connection open to the manager for every frame in both directions, instead of a'
                              ' connection per message. The manager passes the same policy it applies to this proxy.')
+    parser.add_argument('--compress-threshold', type=int, default=None,
+                        help='Compress payloads larger than this many bytes toward a peer that accepts compression'
+                             ' (default 4096; 0 compresses everything).')
     parser.add_argument('--socket-logging', type=str2bool, default=True,
                         help='After registering, ship log records to the manager in LOG batches over the IPC socket'
                              ' instead of stderr (stderr still carries everything before registration and at exit).')
@@ -83,6 +86,8 @@ def launch(launcher_func: Callable, argv: list[str] | None = None) -> int:
     opts = vars(parser.parse_args(argv))    # argparse exits itself on --help or bad arguments.
     configure_logging(opts.pop('log_level'))
     inbound_address, inbound_port = opts.pop('inbound_address'), opts.pop('inbound_port')
+    if opts.get('compress_threshold') is None:
+        opts.pop('compress_threshold', None)        # the connector's default applies
     opts['inbound_params'] = SocketParams(inbound_address, inbound_port) if inbound_port else None
     _log.info(f'Launching Proxy with parameters: {redact(opts)}')
     try:

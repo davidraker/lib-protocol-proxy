@@ -79,6 +79,16 @@ To run a proxy persistently, pass `persistent=True` to `get_proxy` (it reaches t
 both ends apply the same policy). Local proxies stay per-message by default until persistence has run in the
 real-platform matrix for a while.
 
+## Compression
+
+A payload larger than `compress_threshold` bytes (4096 by default; `--compress-threshold` on a proxy, 0 compresses
+everything, None disables) is zlib-compressed toward a peer that advertised `compress`, and header bit 1 is set so the
+receiver inflates it; `data_length` counts the wire bytes. Proxies advertise it in `REGISTER_PEER` `features`, the
+manager in its reply (`{"registered": true, "features": ["compress"]}`; older managers reply plain `true`), so nothing
+is compressed before registration or toward a peer whose features are unknown. Responses are compressed on the same
+rule toward the requester. Receivers always accept both forms; corrupt compressed data fails that request (or that
+connection) and nothing else.
+
 ## Heartbeat and health
 
 The manager sends `PING` (response expected, empty payload) to every registered peer it launched, every

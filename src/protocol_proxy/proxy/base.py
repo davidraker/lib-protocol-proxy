@@ -62,7 +62,21 @@ class ProtocolProxy(IPCConnector, metaclass=abc.ABCMeta):
 
     # ---- liveness -------------------------------------------------------------------------------------------------
     #: Advertised in REGISTER_PEER so the manager knows what this proxy answers.
-    FEATURES: ClassVar[tuple[str, ...]] = ('ping', 'log', 'set_log_level')
+    FEATURES: ClassVar[tuple[str, ...]] = ('ping', 'log', 'set_log_level', 'compress')
+
+    def registration_accepted(self, remote: ProtocolProxyPeer, manager_response) -> bool:
+        """Read the manager's REGISTER_PEER reply: ``{"registered": true, "features": [...]}`` from a current manager
+        (its features are recorded on the peer, e.g. to compress toward it), plain ``true``/``false`` from an older
+        one. Returns whether registration was accepted."""
+        if isinstance(manager_response, (bytes, bytearray)):
+            try:
+                manager_response = json.loads(manager_response.decode('utf8'))
+            except (ValueError, UnicodeDecodeError):
+                return False
+        if isinstance(manager_response, dict):
+            remote.features = tuple(manager_response.get('features') or ())
+            return bool(manager_response.get('registered', manager_response.get('status') != 'error'))
+        return bool(manager_response)
 
     def health_report(self) -> dict:
         """What a PING reply carries. ``remotes`` is protocol-specific: the base counts the remotes with their own

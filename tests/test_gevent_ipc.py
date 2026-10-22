@@ -280,3 +280,45 @@ def test_send_to_an_unreachable_persistent_peer_fails_the_result(pair):
     with pytest.raises(ConnectionError):
         result.get(timeout=2)
     assert nobody.connection is None and not a.connections
+
+
+# ---- compression ---------------------------------------------------------------------------------------------------
+
+def test_large_payloads_are_compressed_only_toward_peers_that_advertised_it(pair):
+    from unittest import mock
+    a, b, peer_b = pair
+    seen = []
+
+    def echo_noting(ipc, headers, raw):
+        seen.append((headers.method_name, headers.compressed, len(raw)))
+        return raw
+    b.register_callback(echo_noting, 'ECHO', provides_response=True)
+    big, small = bytes(range(256)) * 400, b'tiny'
+    assert request(a, peer_b, 'ECHO', big) == big                    # peer_b's features unknown: never compressed
+    assert seen[-1] == ('ECHO', False, len(big))
+    peer_b.features = ('compress',)
+    b.peers[a.proxy_id].features = ('compress',)
+    with mock.patch.object(a, 'decode_payload', wraps=a.decode_payload) as decode:
+        assert request(a, peer_b, 'ECHO', big) == big
+        assert seen[-1] == ('ECHO', True, len(big))                 # compressed on the way out...
+        assert decode.call_args.args[0].compressed                   # ...and the reply came back compressed too
+        assert request(a, peer_b, 'ECHO', small) == small
+        assert seen[-1] == ('ECHO', False, len(small)) and not decode.call_args.args[0].compressed
+    a.compress_threshold = 0
+    assert request(a, peer_b, 'ECHO', small) == small and seen[-1][1] is True
+    peer_b.persistent = True
+    assert request(a, peer_b, 'ECHO', big) == big and seen[-1][1] is True   # same on a persistent connection
+
+
+def test_corrupt_compressed_payload_fails_the_request_not_the_connector(pair):
+    a, b, peer_b = pair
+    b.register_callback(echo, 'ECHO', provides_response=True)
+    peer_b.features = ('compress',)
+    a.compress_threshold = 0
+    import zlib
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(zlib, 'compress', lambda data: b'not zlib at all')
+        result = a.send(peer_b, ProtocolProxyMessage(method_name='ECHO', payload=b'x', response_expected=True))
+        with pytest.raises(ConnectionError):
+            result.get(timeout=2)
+    assert request(a, peer_b, 'ECHO', b'fine afterwards') == b'fine afterwards'

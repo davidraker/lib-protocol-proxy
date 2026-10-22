@@ -4,6 +4,7 @@ import json # TODO: Should we really be using JSON for error responses. If not, 
 import logging
 import socket as _socket
 import struct
+import zlib
 
 from asyncio import BufferedProtocol, Condition, Future, subprocess, Transport
 from asyncio.base_events import Server
@@ -90,7 +91,7 @@ class AsyncioIPCConnector(IPCConnector):
             protocol = await self._link(remote, address)
             if message.response_expected:
                 protocol.pending.add(message.request_id)
-            protocol.transport.write(protocol._message_to_bytes(message, keep_alive=True))
+            protocol.transport.write(protocol._message_to_bytes(message, keep_alive=True, remote=remote))
         except (OSError, Exception) as e:
             _log.warning(f'{self.proxy_name}: Unable to send {message.method_name}'
                          f' (request_id: {message.request_id}) to {remote.proxy_id}: {e}')
@@ -107,7 +108,8 @@ class AsyncioIPCConnector(IPCConnector):
             try:
                 async with remote.ready:
                     transport, _ = await asyncio.wait_for(self.loop.create_connection(
-                        lambda: IPCProtocol(connector=self, outgoing_message=message), *address), self.connect_timeout)
+                        lambda: IPCProtocol(connector=self, outgoing_message=message, outgoing_remote=remote),
+                        *address), self.connect_timeout)
             except (ConnectionError, asyncio.TimeoutError, OSError) as e:
                 # TODO: How might we be smarter about this?
                 connection_attempts -= 1
@@ -207,9 +209,10 @@ class AsyncioIPCConnector(IPCConnector):
 class IPCProtocol(BufferedProtocol):
     def __init__(self, connector: AsyncioIPCConnector, on_lost_connection=None, buffer_size=32768,
                  minimum_read_size: int = 76, outgoing_message=None, protocol_version: int = 1,
-                 persistent: bool = False, peer_id: UUID | None = None):
+                 persistent: bool = False, peer_id: UUID | None = None, outgoing_remote: ProtocolProxyPeer | None = None):
         self.buffer_size = buffer_size
         self.connector: AsyncioIPCConnector = connector
+        self.outgoing_remote = outgoing_remote      # the peer a per-message outgoing frame goes to (for compression)
         # Persistent: frames in both directions until a side closes; per message: one frame and its reply.
         self.persistent, self.peer_id = persistent, peer_id
         self.pending: set[int] = set()          # request ids awaiting responses on this connection
@@ -289,6 +292,8 @@ class IPCProtocol(BufferedProtocol):
                 data = self.received_data[header_end:message_end]
                 self.head = message_end % self.buffer_size
                 self.count -= frame_length
+                if headers.compressed:
+                    data = memoryview(zlib.decompress(data))
                 if headers.keep_alive and not self.persistent:
                     self.connector._adopt(self, headers)
                 if headers.method_name == 'RESPONSE':
@@ -343,7 +348,8 @@ class IPCProtocol(BufferedProtocol):
             _log.warning(f'{self.connector.proxy_name} -- Connection gone before answering {headers.method_name}'
                          f' (request_id: {headers.request_id}).')
             return
-        self.transport.write(self._message_to_bytes(message, keep_alive=self.persistent))
+        self.transport.write(self._message_to_bytes(message, keep_alive=self.persistent,
+                                                    remote=self.connector.peers.get(getattr(headers, 'sender_id', None))))
 
     def connection_made(self, transport: Transport):
         #_log.debug(f"[IPCProtocol] connection_made: transport={transport}")
@@ -354,7 +360,7 @@ class IPCProtocol(BufferedProtocol):
                 self._make_persistent(self.peer_id)
             if self.outgoing_message:
                 # TODO: Should we send in chunks and sleep in between?
-                transport.write(self._message_to_bytes(self.outgoing_message))
+                transport.write(self._message_to_bytes(self.outgoing_message, remote=self.outgoing_remote))
                 if not self.outgoing_message.response_expected:
                     transport.close()
                 else:
@@ -362,14 +368,16 @@ class IPCProtocol(BufferedProtocol):
         except Exception as e:
             _log.warning(f'{self.connector.proxy_name} -- Exception in connection_made: {e}')
 
-    def _message_to_bytes(self, message: ProtocolProxyMessage, keep_alive: bool = False):
+    def _message_to_bytes(self, message: ProtocolProxyMessage, keep_alive: bool = False,
+                          remote: ProtocolProxyPeer | None = None):
         protocol = self.connector.PROTOCOL_VERSION[message.protocol_version]
         extra = {'remote_id': message.remote_id} if message.protocol_version >= 2 else {}
-        message_bytes = bytearray(protocol(len(message.payload), message.method_name,
+        payload, compressed = self.connector.encode_payload(remote, bytes(message.payload))
+        message_bytes = bytearray(protocol(len(payload), message.method_name,
                                            message.request_id, self.connector.proxy_id,
                                            self.connector.token, message.response_expected, keep_alive=keep_alive,
-                                           **extra).pack())
-        message_bytes.extend(message.payload)  # TODO: Does payload still need to be encoded?
+                                           compressed=compressed, **extra).pack())
+        message_bytes.extend(payload)
         return message_bytes
 
     def connection_lost(self, exc):

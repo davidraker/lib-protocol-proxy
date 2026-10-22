@@ -207,3 +207,17 @@ def test_asyncio_sigterm_stops_the_proxy_gracefully():
             await asyncio.wait_for(serving, 2)          # returns instead of raising CancelledError
         assert p._stopping and not p.inbound_server.is_serving()
     asyncio.run(main())
+
+
+def test_registration_reply_from_a_current_manager_records_its_features():
+    p = gevent_proxy()
+    manager_peer = p.peers[p.manager]
+    assert p.registration_accepted(manager_peer, b'{"registered": true, "features": ["compress"]}') is True
+    assert manager_peer.features == ('compress',)
+    assert p.registration_accepted(manager_peer, b'{"registered": false}') is False
+    assert p.registration_accepted(manager_peer, b'true') is True        # an older manager
+    assert p.registration_accepted(manager_peer, b'false') is False
+    assert p.registration_accepted(manager_peer, b'{"status": "error", "error": "x"}') is False
+    assert p.registration_accepted(manager_peer, b'garbage') is False
+    p.inbound_server_socket = mock.Mock(getsockname=lambda: ('127.0.0.1', 5))
+    assert json.loads(p._get_registration_message().payload)['features'] == ['ping', 'log', 'set_log_level', 'compress']

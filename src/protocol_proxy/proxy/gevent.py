@@ -51,8 +51,7 @@ class GeventProtocolProxy(GeventIPCConnector, ProtocolProxy, ABC):
                 manager_response = self.send(remote, message)
                 if isinstance(manager_response, AsyncResult):
                     manager_response = manager_response.get(timeout=self.registration_timeout)
-                success = (json.loads(manager_response.decode('utf8'))
-                           if isinstance(manager_response, (bytes, bytearray)) else bool(manager_response))
+                success = self.registration_accepted(remote, manager_response)
             except Timeout:
                 _log.warning(f'{self.proxy_name}: No registration response from manager within'
                              f' {self.registration_timeout} seconds (attempt {attempt}).')

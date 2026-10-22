@@ -1,13 +1,14 @@
 import json
 import logging
 import time
+import zlib
 
 from abc import abstractmethod, ABC, ABCMeta
 from collections.abc import Generator
 from dataclasses import dataclass
 from itertools import cycle
 from psutil import net_connections
-from typing import Any, Awaitable, Callable, NamedTuple
+from typing import Any, Awaitable, Callable, ClassVar, NamedTuple
 from uuid import UUID
 
 from . import callback, HeadersV1, HeadersV2, ProtocolHeaders
@@ -83,10 +84,15 @@ class IPCConnector(metaclass=ABCMeta):
     #: Frames larger than this (header and payload) take a dedicated per-message connection even toward a persistent
     #: peer, so a multi-megabyte registration or profile does not hold every other frame behind it.
     PERSISTENT_MAX_FRAME = 256 * 1024
+    #: Payloads larger than this are zlib-compressed toward a peer that advertised ``compress``.
+    COMPRESS_THRESHOLD = 4096
+    #: What this connector tells its peers it understands (proxies in REGISTER_PEER, the manager in its reply).
+    FEATURES: ClassVar[tuple[str, ...]] = ('compress',)
 
     def __init__(self, *, proxy_id: UUID, token: UUID, proxy_name: str = None, inbound_params: SocketParams = None,
                  chunk_size: int = 1024, encrypt: bool = False, min_port: int = 22801, max_port: int = 22899,
-                 persistent: bool = False, persistent_max_frame: int | None = PERSISTENT_MAX_FRAME, **kwargs):
+                 persistent: bool = False, persistent_max_frame: int | None = PERSISTENT_MAX_FRAME,
+                 compress_threshold: int | None = COMPRESS_THRESHOLD, **kwargs):
         """ Handles socket communication between ProtocolProxy and ProtocolProxyManager.
 
         Connection lifetime is a policy per peer (``ProtocolProxyPeer.persistent``), defaulting to ``persistent``
@@ -102,6 +108,7 @@ class IPCConnector(metaclass=ABCMeta):
         self.encrypt: bool = encrypt
         self.persistent: bool = persistent
         self.persistent_max_frame: int | None = persistent_max_frame
+        self.compress_threshold: int | None = compress_threshold
         self.inbound_params = inbound_params
         self.min_port: int = min_port
         self.max_port: int = max_port
@@ -145,6 +152,22 @@ class IPCConnector(metaclass=ABCMeta):
         for p in range(next_port, self.max_port + 1):
             if p not in used_ports:
                 yield p
+
+    def encode_payload(self, remote: ProtocolProxyPeer | None, payload: bytes) -> tuple[bytes, bool]:
+        """The payload as it goes on the wire toward ``remote`` and whether it was compressed: zlib when the peer
+        advertised ``compress`` and the payload exceeds the threshold (nothing is compressed toward a peer whose
+        features are unknown, e.g. before its registration)."""
+        if (remote is not None and self.compress_threshold is not None and 'compress' in remote.features
+                and len(payload) > self.compress_threshold):
+            return zlib.compress(payload), True
+        return payload, False
+
+    @staticmethod
+    def decode_payload(headers: ProtocolHeaders, payload) -> bytes:
+        """The payload as sent: decompressed when the header says so. Raises zlib.error on corrupt data."""
+        if getattr(headers, 'compressed', False):
+            return zlib.decompress(payload)
+        return payload
 
     def is_persistent(self, remote: ProtocolProxyPeer) -> bool:
         """Whether new connections toward this peer are kept open (the peer's own policy, else this connector's)."""

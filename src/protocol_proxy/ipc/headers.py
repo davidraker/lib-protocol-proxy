@@ -61,19 +61,24 @@ class HeadersV1(ProtocolHeaders):
     HEADER_LENGTH = struct.calcsize(FORMAT)  # TODO: Should we make this a property instead?
     #: bitflags: bit 0 response expected; bits 1 and 2 are reserved for compression and encryption; bit 3 keep-alive.
     RESPONSE_EXPECTED_BIT = 0
+    COMPRESSED_BIT = 1
     KEEP_ALIVE_BIT = 3
     VERSION = 1
 
     def __init__(self, data_length: int, method_name: str, request_id: int, sender_id, sender_token,
-                 response_expected: bool = False, keep_alive: bool = False, **kwargs):
+                 response_expected: bool = False, keep_alive: bool = False, compressed: bool = False, **kwargs):
         super(HeadersV1, self).__init__(data_length, method_name, request_id, sender_id, sender_token, **kwargs)
         self.response_expected: bool = response_expected  # Position 0 in bitflags within struct.
+        # The payload is zlib-compressed (data_length counts the compressed bytes).
+        self.compressed: bool = compressed
         # The sender keeps this connection open for further frames in both directions (a persistent connection); the
         # receiver may send to the authenticated sender on it instead of dialling the sender's advertised address.
         self.keep_alive: bool = keep_alive
 
     def _bitflags(self) -> int:
-        return (int(self.response_expected) << self.RESPONSE_EXPECTED_BIT) | (int(self.keep_alive) << self.KEEP_ALIVE_BIT)
+        return ((int(self.response_expected) << self.RESPONSE_EXPECTED_BIT)
+                | (int(self.compressed) << self.COMPRESSED_BIT)
+                | (int(self.keep_alive) << self.KEEP_ALIVE_BIT))
 
     def pack(self):
         return super(HeadersV1, self).pack() + struct.pack(f'>H', self._bitflags())    # 2 byte (16-bit) bitflags.
@@ -85,7 +90,8 @@ class HeadersV1(ProtocolHeaders):
         method = method_bytes.rstrip(b'\x00').decode('utf8')
         return cls(data_length, method, request_id, UUID(bytes=sender_id_bytes), UUID(bytes=sender_token_bytes),
                    cls.bitflag_is_set(cls.RESPONSE_EXPECTED_BIT, bitflags),
-                   keep_alive=cls.bitflag_is_set(cls.KEEP_ALIVE_BIT, bitflags))
+                   keep_alive=cls.bitflag_is_set(cls.KEEP_ALIVE_BIT, bitflags),
+                   compressed=cls.bitflag_is_set(cls.COMPRESSED_BIT, bitflags))
 
 
 class HeadersV2(HeadersV1):
@@ -126,7 +132,8 @@ class HeadersV2(HeadersV1):
         remote_id = None if remote_id_bytes == cls.NO_REMOTE else UUID(bytes=remote_id_bytes)
         return cls(data_length, method, request_id, UUID(bytes=sender_id_bytes), UUID(bytes=sender_token_bytes),
                    cls.bitflag_is_set(cls.RESPONSE_EXPECTED_BIT, bitflags), remote_id,
-                   keep_alive=cls.bitflag_is_set(cls.KEEP_ALIVE_BIT, bitflags))
+                   keep_alive=cls.bitflag_is_set(cls.KEEP_ALIVE_BIT, bitflags),
+                   compressed=cls.bitflag_is_set(cls.COMPRESSED_BIT, bitflags))
 
     def __repr__(self):
-        return super(HeadersV2, self).__repr__() + f', remote_id={self.remote_id}, keep_alive={self.keep_alive}'
+        return super(HeadersV2, self).__repr__() + f', remote_id={self.remote_id}, keep_alive={self.keep_alive}, compressed={self.compressed}'

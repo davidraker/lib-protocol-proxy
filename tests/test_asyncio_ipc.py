@@ -251,3 +251,26 @@ def test_gevent_manager_and_asyncio_proxy_exchange_in_both_directions(persistent
         proxy.close()
         manager.stop()
         gevent.joinall([loop], timeout=2)
+
+
+def test_compression_is_negotiated_per_peer_and_round_trips():
+    from unittest import mock
+
+    async def main():
+        a, b, peer_a, peer_b = await make_pair()
+        seen = []
+
+        def echo_noting(ipc, headers, raw):
+            seen.append(headers.compressed)
+            return raw
+        b.register_callback(echo_noting, 'NOTE', provides_response=True)
+        big = bytes(range(256)) * 400
+        assert await request(a, peer_b, 'NOTE', big) == big and seen[-1] is False
+        peer_b.features = peer_a.features = ('compress',)
+        for persistent in (False, True):
+            peer_b.persistent = persistent
+            with mock.patch.object(a, 'decode_payload', wraps=a.decode_payload):
+                assert await request(a, peer_b, 'NOTE', big) == big and seen[-1] is True
+                assert await request(a, peer_b, 'NOTE', b'tiny') == b'tiny' and seen[-1] is False
+        await stop_all(a, b)
+    asyncio.run(main())

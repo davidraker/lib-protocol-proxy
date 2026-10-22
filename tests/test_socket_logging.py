@@ -179,7 +179,7 @@ def test_real_proxy_logs_by_stderr_then_socket_then_stderr_at_exit(proxy_class_n
         _wait(lambda: peer.state == 'healthy', what='a heartbeat reply from the real proxy')
         health = manager.health()["('dummy', 'x')"]
         assert health['pid'] == peer.process.pid and health['report']['uptime'] > 0
-        assert health['features'] == ['ping', 'log', 'set_log_level'] and peer.features == tuple(health['features'])
+        assert health['features'] == ['ping', 'log', 'set_log_level', 'compress'] and peer.features == tuple(health['features'])
         reply = manager.set_proxy_log_level(peer, 'DEBUG').get(timeout=5)
         assert json.loads(reply) == {'level': 'DEBUG'}
         _wait(lambda: any(r.levelno == logging.DEBUG and r.getMessage().startswith('debug tick') for r in by_socket()),

@@ -168,3 +168,15 @@ def test_keep_alive_bit_round_trips_in_both_versions():
         plain = cls.unpack(cls(3, 'M', 7, sender, token).pack()[2:])
         assert not plain.keep_alive and not plain.response_expected
     assert HeadersV1.KEEP_ALIVE_BIT == 3 and HeadersV2.KEEP_ALIVE_BIT == 3
+
+
+def test_compressed_bit_round_trips_independently_of_the_others():
+    from uuid import uuid4
+    from protocol_proxy.ipc import HeadersV1, HeadersV2
+    sender, token = uuid4(), uuid4()
+    for cls in (HeadersV1, HeadersV2):
+        headers = cls.unpack(cls(3, 'M', 7, sender, token, compressed=True).pack()[2:])
+        assert headers.compressed and not headers.keep_alive and not headers.response_expected
+        both = cls.unpack(cls(3, 'M', 7, sender, token, response_expected=True, keep_alive=True, compressed=True).pack()[2:])
+        assert both.compressed and both.keep_alive and both.response_expected
+    assert HeadersV1.COMPRESSED_BIT == 1
