@@ -91,16 +91,12 @@ def test_connector_dispatches_by_remote_then_method():
 
 def test_gevent_sends_the_message_version_with_or_without_a_remote():
     p = gevent_proxy()
-    sock = mock.Mock()
     remote = uuid4()
-    p._send_headers(sock, 3, 1, False, 'M', 2, remote)
-    tagged = sock.send.call_args.args[0]
+    tagged = p._pack_headers(3, 1, False, 'M', 2, remote)
     assert tagged[:2] == b'\x00\x02' and HeadersV2.unpack(tagged[2:]).remote_id == remote
-    p._send_headers(sock, 3, 1, False, 'M', 2, None)
-    untagged = sock.send.call_args.args[0]
+    untagged = p._pack_headers(3, 1, False, 'M', 2, None)
     assert untagged[:2] == b'\x00\x02' and HeadersV2.unpack(untagged[2:]).remote_id is None
-    p._send_headers(sock, 3, 1, False, 'M', 1)                                   # opted down for an old peer
-    v1 = sock.send.call_args.args[0]
+    v1 = p._pack_headers(3, 1, False, 'M', 1)                                   # opted down for an old peer
     assert v1[:2] == b'\x00\x01' and len(v1) == 2 + HeadersV1.HEADER_LENGTH
 
 
