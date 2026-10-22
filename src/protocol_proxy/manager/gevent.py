@@ -65,7 +65,7 @@ class GeventProtocolProxyManager(ProtocolProxyManager, GeventIPCConnector, ABC):
         if command:
             # The peer is registered before the process is launched: launching yields to other greenlets, and a
             # concurrent get_proxy for the same key must find this peer rather than launch a second process.
-            peer = GeventProtocolProxyPeer(process=None, proxy_id=proxy_id, token=uuid4(),
+            peer = GeventProtocolProxyPeer(process=None, proxy_id=proxy_id, token=uuid4(), name=proxy_name,
                                            persistent=self.peer_policy(kwargs))
             self.peers[proxy_id] = peer
             try:
@@ -96,6 +96,10 @@ class GeventProtocolProxyManager(ProtocolProxyManager, GeventIPCConnector, ABC):
     @callback
     def handle_peer_registration(self, headers: ProtocolHeaders, raw_message: bytes):
         return super().handle_peer_registration(headers, raw_message)
+
+    @callback
+    def handle_log(self, headers: ProtocolHeaders, raw_message: bytes):
+        return super().handle_log(headers, raw_message)
 
     def _cleanup_proxy_process(self, process: Popen, timeout: float = 5.0):
         # TODO: Waits may block. Check this and change to a method that yields if needed.

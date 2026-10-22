@@ -9,8 +9,8 @@ from pkgutil import iter_modules
 from typing import ClassVar
 from uuid import UUID
 
-from ..ipc import IPCConnector, ProtocolProxyMessage, ProtocolProxyPeer, SocketParams
-from ..logs import guard_logging
+from ..ipc import callback, IPCConnector, ProtocolHeaders, ProtocolProxyMessage, ProtocolProxyPeer, SocketParams
+from ..logs import guard_logging, SocketLogHandler, switch_to_socket, switch_to_stderr
 
 _log = logging.getLogger(__name__)
 
@@ -24,8 +24,13 @@ class ProtocolProxy(IPCConnector, metaclass=abc.ABCMeta):
     # Whether the proxy process must be gevent monkey-patched before this module is imported.
     PATCH_GEVENT: ClassVar[bool] = False
 
+    # LOG batches: flushed every LOG_FLUSH_INTERVAL seconds or as soon as LOG_BATCH_SIZE records are queued.
+    LOG_FLUSH_INTERVAL = 0.2
+    LOG_BATCH_SIZE = 64
+
     def __init__(self, *, manager_address: str, manager_port: int, manager_id: UUID,
-                 registration_retry_delay: float = 20.0, manager_watch_interval: float = 1.0, **kwargs):
+                 registration_retry_delay: float = 20.0, manager_watch_interval: float = 1.0,
+                 socket_logging: bool = True, **kwargs):
         """NOTE: Proxy implementations MUST:
             1. Subclass a multitasking subclass of IPCConnector (gevent, asyncio, etc.)
             2. Subclass this "ProtocolProxy" class.
@@ -43,7 +48,56 @@ class ProtocolProxy(IPCConnector, metaclass=abc.ABCMeta):
         self.manager_watch_interval: float = manager_watch_interval
         self._parent_pid: int = os.getppid()
         self._manager_lost: bool = False
+        # Once registered, records are shipped to the manager in LOG batches over the IPC socket instead of stderr
+        # (the channel every launch mode has, and the encrypted one when the IPC is). stderr still carries everything
+        # before registration and whatever is left in the queue at exit.
+        self.socket_logging: bool = socket_logging
+        self.log_handler: SocketLogHandler | None = None
+        self.register_callback(self.handle_set_log_level, 'SET_LOG_LEVEL', provides_response=True)
         self.apply_plugins()
+
+    # ---- logging over the socket ----------------------------------------------------------------------------------
+    def on_registered(self):
+        """Called once registration with the manager has succeeded. Starts shipping logs over the socket."""
+        if self.socket_logging and self.log_handler is None:
+            handler = SocketLogHandler()
+            if switch_to_socket(handler):
+                self.log_handler = handler
+                self._start_log_flusher()
+                _log.info(f'{self.proxy_name}: logging over the IPC socket from here on.')
+
+    def _start_log_flusher(self):
+        """Flavours start their periodic ``flush_logs`` here."""
+
+    def log_batch_message(self, limit: int | None = None) -> ProtocolProxyMessage | None:
+        """The next LOG push (``{"records": [...], "dropped": n}``), or None when nothing is queued."""
+        if self.log_handler is None:
+            return None
+        records, dropped = self.log_handler.drain(limit)
+        if not records and not dropped:
+            return None
+        payload = json.dumps({'records': records, 'dropped': dropped}, default=str).encode('utf8')
+        return ProtocolProxyMessage(method_name='LOG', payload=payload)
+
+    def stop_socket_logging(self):
+        """Back to stderr: what is still queued goes out as JSON lines there, so the manager reads it from the pipe."""
+        if self.log_handler is not None:
+            handler, self.log_handler = self.log_handler, None
+            switch_to_stderr(handler)
+
+    @callback
+    def handle_set_log_level(self, headers: ProtocolHeaders, raw_message: bytes) -> bytes:
+        """``{"level": "DEBUG"}`` from the manager sets the root logger's level at run time; replies with the level
+        in force. The manager gates on the same level on its side, so both ends agree."""
+        try:
+            level = json.loads(raw_message.decode('utf8')).get('level')
+            if isinstance(level, str):
+                level = level.upper()
+            logging.getLogger().setLevel(level)
+            _log.info(f'{self.proxy_name}: log level set to {logging.getLevelName(logging.getLogger().level)}.')
+        except (ValueError, TypeError, AttributeError) as e:
+            return json.dumps({'status': 'error', 'error': f'Invalid log level: {e}', 'method': 'SET_LOG_LEVEL'}).encode('utf8')
+        return json.dumps({'level': logging.getLevelName(logging.getLogger().level)}).encode('utf8')
 
     def guard_logging(self):
         """Run from start(), once the protocol library is imported: strip handlers a library installed on its own

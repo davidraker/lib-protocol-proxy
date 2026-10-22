@@ -92,6 +92,17 @@ reduced to logger-safe characters). That logger's effective level gates the reco
 stderr WARNING) or by a syslog-style `<N>` prefix (`<7>` debug ... `<2>` critical), the same rules VOLTTRON applies
 to agent output.
 
+Once a proxy has registered, its records travel over the IPC socket instead: a non-blocking handler queues them and
+the proxy sends a `LOG` message (no response) every 0.2 s or 64 records, `{"records": [fields...], "dropped": n}`,
+which the manager feeds through the same reader (`channel` is `socket` on those records, `stderr` or `stdout`
+otherwise). The queue is bounded (2000 records) and rate-limited (50 records/s sustained, bursts of 200); records
+beyond that are dropped and counted, and the manager logs the count as a WARNING. stderr still carries everything
+before registration and whatever is queued at exit, so a proxy that dies early is still heard. The socket is the
+channel every launch mode has (a remote proxy's stderr may never reach the manager) and it will be the encrypted one.
+`--socket-logging False` keeps stderr throughout. `manager.set_proxy_log_level(peer, 'DEBUG')` sends
+`SET_LOG_LEVEL` to a running proxy and gates the manager's logger for it at the same level, so a remote proxy's
+verbosity can be raised for a while without a restart.
+
 Inside the proxy, `configure_logging` (run by the launcher, re-checked at `start()`) also captures what would bypass
 `logging`: Python warnings (`py.warnings`), uncaught exceptions (`protocol_proxy.uncaught`), gevent greenlet
 tracebacks (`gevent.hub`, one record per failure) and anything printed to stdout (`stdout`, INFO). Handlers that a

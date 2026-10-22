@@ -56,7 +56,7 @@ class AsyncioProtocolProxyManager(ProtocolProxyManager, AsyncioIPCConnector, ABC
             proxy_process.stdin.close()
             proxy_process.stdin = None
             self.peers[proxy_id] = AsyncioProtocolProxyPeer(process=proxy_process, proxy_id=proxy_id, token=peer_token,
-                                                            persistent=self.peer_policy(kwargs))
+                                                            name=proxy_name, persistent=self.peer_policy(kwargs))
             self._setup_exit(proxy_process)
             atexit.register(self.finalize_process, proxy_process)
         return self.peers[proxy_id]
@@ -77,6 +77,10 @@ class AsyncioProtocolProxyManager(ProtocolProxyManager, AsyncioIPCConnector, ABC
             success = super().handle_peer_registration(headers, raw_message)
             proxy.ready.notify_all()
             return success
+
+    @callback
+    def handle_log(self, headers: ProtocolHeaders, raw_message: bytes):
+        return super().handle_log(headers, raw_message)
 
     @staticmethod
     def _setup_exit(process: subprocess.Process):

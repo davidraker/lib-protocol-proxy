@@ -10,8 +10,8 @@ from typing import Callable, Iterable, Type, TypeVar
 from uuid import uuid4, UUID
 from weakref import WeakMethod, WeakValueDictionary
 
-from ..ipc import IPCConnector, ProtocolHeaders, ProtocolProxyPeer, SocketParams
-from ..logs import LAUNCHED_BY_MANAGER_ENV, log_entries, proxy_logger_name
+from ..ipc import IPCConnector, ProtocolHeaders, ProtocolProxyMessage, ProtocolProxyPeer, SocketParams
+from ..logs import LAUNCHED_BY_MANAGER_ENV, handle_log_batch, log_entries, proxy_logger_name
 from ..proxy import ProtocolProxy
 from ..proxy.launch import str2bool
 
@@ -30,6 +30,7 @@ class ProtocolProxyManager(IPCConnector, ABC):
         # Weak references to ``callback(peer, reason)`` callables, told when a launched proxy is lost (see on_peer_lost).
         self.peer_lost_callbacks: list = []
         self.register_callback(self.handle_peer_registration, 'REGISTER_PEER', provides_response=True)
+        self.register_callback(self.handle_log, 'LOG')
 
     def on_peer_lost(self, callback: Callable[[ProtocolProxyPeer, str], None]):
         """Call ``callback(peer, reason)`` whenever a proxy this manager launched is lost: its process exited, or it
@@ -129,6 +130,30 @@ class ProtocolProxyManager(IPCConnector, ABC):
         else:  # TODO: Is there any reasonable situation where this runs and returns false?
             _log.error(f'PPM: Failed to register peer: {proxy.proxy_id} with message: {message}.')
             return json.dumps(False).encode('utf8')
+
+    def handle_log(self, headers: ProtocolHeaders, raw_message: bytes):
+        """A LOG batch from a registered proxy: its records are handled through the proxy's logger exactly like
+        lines read from its stderr (see protocol_proxy.logs.handle_log_batch)."""
+        peer: ProtocolProxyPeer = self.peers.get(headers.sender_id)
+        if peer is None:
+            _log.warning(f'PPM: LOG batch from unknown peer {headers.sender_id} ignored.')
+            return
+        name = peer.name if peer.name is not None else str(peer.proxy_id)
+        pid = getattr(getattr(peer, 'process', None), 'pid', None)
+        try:
+            handle_log_batch(raw_message, self.proxy_logger(name), pid=pid, process_name=name)
+        except (ValueError, TypeError, UnicodeDecodeError) as e:
+            _log.warning(f'PPM: Undecodable LOG batch from {name}: {e}')
+
+    def set_proxy_log_level(self, peer: ProtocolProxyPeer, level: str | int):
+        """Change a running proxy's log level (``SET_LOG_LEVEL``) and gate its records here at the same level.
+        Returns what ``send`` returns: the pending reply (``{"level": ...}``) or False."""
+        level_name = logging.getLevelName(level) if isinstance(level, int) else str(level).upper()
+        name = peer.name if peer.name is not None else str(peer.proxy_id)
+        self.proxy_logger(name).setLevel(level_name)
+        return self.send(peer, ProtocolProxyMessage(method_name='SET_LOG_LEVEL',
+                                                    payload=json.dumps({'level': level_name}).encode('utf8'),
+                                                    response_expected=True))
 
     @classmethod
     def get_manager(cls, proxy_class: Type[ProtocolProxy] | str,

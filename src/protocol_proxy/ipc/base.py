@@ -53,6 +53,8 @@ class ProtocolProxyPeer(ABC):
     ready: Any
     token: UUID
     socket_params: SocketParams = None
+    #: The peer's proxy name (what the manager launched it as); the manager logs its records under it.
+    name: str | None = None
     #: Connection lifetime toward this peer: True keeps one connection open for every frame in both directions,
     #: False dials a connection per message, None uses the connector's default (``IPCConnector.persistent``).
     persistent: bool | None = None

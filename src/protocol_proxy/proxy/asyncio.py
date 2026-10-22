@@ -8,6 +8,7 @@ from typing import cast
 from uuid import UUID
 
 from ..ipc.asyncio import AsyncioIPCConnector, Future, AsyncioProtocolProxyPeer, SocketParams
+from ..logs import write_json_line
 from . import ProtocolProxy
 
 _log = logging.getLogger(__name__)
@@ -27,6 +28,7 @@ class AsyncioProtocolProxy(AsyncioIPCConnector, ProtocolProxy, ABC):
         self.registration_timeout = registration_timeout
         self.registered = False
         self._stopping = False
+        self._log_flusher: asyncio.Task | None = None
 
     def get_local_socket_params(self) -> SocketParams:
         if self.inbound_server is None:
@@ -70,9 +72,40 @@ class AsyncioProtocolProxy(AsyncioIPCConnector, ProtocolProxy, ABC):
         if asyncio.iscoroutine(result):
             await result
 
+    def _start_log_flusher(self):
+        self._log_flusher = self.loop.create_task(self._flush_logs_loop())
+
+    async def _flush_logs_loop(self):
+        try:
+            while not self._stopping and self.log_handler is not None:
+                waited = 0.0
+                while (not self._stopping and self.log_handler is not None and waited < self.LOG_FLUSH_INTERVAL
+                       and len(self.log_handler) < self.LOG_BATCH_SIZE):
+                    await asyncio.sleep(0.02)
+                    waited += 0.02
+                await self.flush_logs()
+        except asyncio.CancelledError:
+            pass
+
+    async def flush_logs(self):
+        """Ship one LOG batch to the manager (no response expected); records that cannot be sent go to stderr."""
+        if (message := self.log_batch_message(self.LOG_BATCH_SIZE)) is None:
+            return
+        try:
+            sent = await self.send(cast(AsyncioProtocolProxyPeer, self.peers[self.manager]), message)
+        except Exception:
+            sent = False
+        if sent is False:
+            for fields in json.loads(message.payload)['records']:
+                write_json_line(fields)
+
     async def stop(self):
         """Stop serving. A protocol overrides this to close its sessions and flush state first, then calls super."""
         self._stopping = True
+        if self._log_flusher is not None:
+            self._log_flusher.cancel()
+            self._log_flusher = None
+        self.stop_socket_logging()
         if self.inbound_server is not None:
             await super(AsyncioProtocolProxy, self).stop()
 
@@ -89,6 +122,7 @@ class AsyncioProtocolProxy(AsyncioIPCConnector, ProtocolProxy, ABC):
         await super(AsyncioProtocolProxy, self).start()
         if not await self.send_registration(cast(AsyncioProtocolProxyPeer, self.peers[self.manager])):
             raise RuntimeError(f'{self.proxy_name}: registration with the Proxy Manager failed.')
+        self.on_registered()
         watchdog = asyncio.ensure_future(self._watch_manager())
         try:
             self.loop.add_signal_handler(signal.SIGTERM, self._on_terminate_signal, signal.SIGTERM)

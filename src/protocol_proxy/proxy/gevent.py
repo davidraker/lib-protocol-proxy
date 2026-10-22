@@ -10,6 +10,7 @@ from typing import cast
 from uuid import UUID
 
 from ..ipc.gevent import GeventIPCConnector, GeventProtocolProxyPeer, SocketParams
+from ..logs import write_json_line
 from . import ProtocolProxy
 
 _log = logging.getLogger(__name__)
@@ -62,6 +63,7 @@ class GeventProtocolProxy(GeventIPCConnector, ProtocolProxy, ABC):
             if success:
                 self.registered = True
                 _log.info(f'{self.proxy_name}: Registered with manager @ {remote.socket_params}.')
+                self.on_registered()
                 return True
             if attempt < self.registration_attempts:
                 sleep(self.registration_retry_delay)
@@ -74,6 +76,35 @@ class GeventProtocolProxy(GeventIPCConnector, ProtocolProxy, ABC):
         """Protocol-specific work. Runs concurrently with the select loop; should return when self._stop is set."""
         while not self._stop:
             sleep(0.5)
+
+    def _start_log_flusher(self):
+        self._greenlets.append(spawn(self._flush_logs_loop))
+
+    def _flush_logs_loop(self):
+        while not self._stop and self.log_handler is not None:
+            waited = 0.0
+            while (not self._stop and self.log_handler is not None and waited < self.LOG_FLUSH_INTERVAL
+                   and len(self.log_handler) < self.LOG_BATCH_SIZE):
+                sleep(0.02)
+                waited += 0.02
+            self.flush_logs()
+
+    def flush_logs(self):
+        """Ship one LOG batch to the manager (no response expected). Nothing here logs on failure: the records that
+        could not be sent go back to stderr, and a logging call from the flusher would only queue more."""
+        if (message := self.log_batch_message(self.LOG_BATCH_SIZE)) is None:
+            return
+        try:
+            sent = self.send(cast(GeventProtocolProxyPeer, self.peers[self.manager]), message)
+        except Exception:
+            sent = False
+        if sent is False:
+            for fields in json.loads(message.payload)['records']:
+                write_json_line(fields)
+
+    def stop(self):
+        self.stop_socket_logging()
+        super(GeventProtocolProxy, self).stop()
 
     def _watch_manager(self):
         while not self._stop and self.manager_alive():

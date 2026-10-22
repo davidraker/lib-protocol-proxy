@@ -21,9 +21,11 @@ import os
 import re
 import stat
 import sys
+import time
 import traceback
 import warnings
 
+from collections import deque
 from os import environ
 from typing import Iterable, TextIO
 
@@ -61,16 +63,71 @@ def isapipe(stream) -> bool:
         return False
 
 
+def record_fields(record: logging.LogRecord) -> dict:
+    """The wire form of a record: its attributes with ``msg`` interpolated and the traceback rendered to
+    ``exc_text``. The same dict travels as a JSON line on stderr and inside a LOG batch over the socket."""
+    fields = {k: v for k, v in record.__dict__.items() if k not in _UNSERIALIZED}
+    fields['msg'] = record.getMessage()
+    if record.exc_info and not record.exc_text:
+        fields['exc_text'] = ''.join(traceback.format_exception(*record.exc_info))
+    return fields
+
+
 class JsonLineFormatter(logging.Formatter):
     """Emit a record as one JSON object per line with the ``LogRecord`` attribute names, so a reader rebuilds it with
     ``logging.makeLogRecord``. Every value is JSON-escaped; values JSON cannot carry are rendered with ``str``."""
 
     def format(self, record: logging.LogRecord) -> str:
-        fields = {k: v for k, v in record.__dict__.items() if k not in _UNSERIALIZED}
-        fields['msg'] = record.getMessage()
-        if record.exc_info and not record.exc_text:
-            fields['exc_text'] = ''.join(traceback.format_exception(*record.exc_info))
-        return json.dumps(fields, default=str)
+        return json.dumps(record_fields(record), default=str)
+
+
+class SocketLogHandler(logging.Handler):
+    """Queues records for a proxy to ship to its manager in LOG batches over the IPC socket. ``emit`` never blocks
+    and never does I/O: it renders the record to its wire fields and appends them to a bounded queue, subject to a
+    token bucket (``rate`` records per second sustained, ``burst`` at once). Records beyond the queue or the bucket
+    are dropped and counted; the count travels in the next batch so the manager can say how many were lost.
+    The proxy's flusher calls ``drain`` on an interval or when ``len`` reaches its batch size."""
+
+    def __init__(self, maxlen: int = 2000, rate: float = 50.0, burst: int = 200):
+        super().__init__()
+        self.queue: deque = deque()
+        self.maxlen = maxlen
+        self.rate, self.burst = rate, burst
+        self._tokens = float(burst)
+        self._refilled = time.monotonic()
+        self.dropped = 0
+        self.total_dropped = 0
+
+    def _take_token(self) -> bool:
+        now = time.monotonic()
+        self._tokens = min(self.burst, self._tokens + (now - self._refilled) * self.rate)
+        self._refilled = now
+        if self._tokens >= 1:
+            self._tokens -= 1
+            return True
+        return False
+
+    def emit(self, record: logging.LogRecord):
+        try:
+            fields = record_fields(record)
+        except Exception:
+            self.handleError(record)
+            return
+        if len(self.queue) >= self.maxlen or not self._take_token():
+            self.dropped += 1
+            self.total_dropped += 1
+            return
+        self.queue.append(fields)
+
+    def __len__(self) -> int:
+        return len(self.queue)
+
+    def drain(self, limit: int | None = None) -> tuple[list[dict], int]:
+        """Take up to ``limit`` queued records (all when None) and the count dropped since the last drain."""
+        count = len(self.queue) if limit is None else min(limit, len(self.queue))
+        records = [self.queue.popleft() for _ in range(count)]
+        dropped, self.dropped = self.dropped, 0
+        return records, dropped
 
 
 class LoggingWriter(io.TextIOBase):
@@ -131,11 +188,59 @@ class LoggingWriter(io.TextIOBase):
 
 
 _configured: bool = False
+_json_lines: bool = False
+_stderr_handler: logging.Handler | None = None
 
 
 def is_configured() -> bool:
     """Whether configure_logging has run in this process (i.e. this is a launched proxy, not a test or a library user)."""
     return _configured
+
+
+def uses_json_lines() -> bool:
+    """Whether this process writes the JSON record channel (launched by a manager that reads it)."""
+    return _configured and _json_lines
+
+
+def switch_to_socket(handler: SocketLogHandler) -> bool:
+    """Route the root logger to ``handler`` instead of the stderr channel, once a proxy has registered and can
+    ship LOG batches. Only in a manager-launched process on the JSON channel; returns whether it switched."""
+    if not uses_json_lines() or _stderr_handler is None:
+        return False
+    root = logging.getLogger()
+    if _stderr_handler in root.handlers:
+        root.removeHandler(_stderr_handler)
+    if handler not in root.handlers:
+        root.addHandler(handler)
+    return True
+
+
+def switch_to_stderr(handler: SocketLogHandler | None = None):
+    """Route the root logger back to the stderr channel (at exit, or when the socket cannot be used) and write what
+    ``handler`` still holds as JSON lines on stderr, so nothing queued is lost."""
+    root = logging.getLogger()
+    if handler is not None and handler in root.handlers:
+        root.removeHandler(handler)
+    if _stderr_handler is not None and _stderr_handler not in root.handlers:
+        root.addHandler(_stderr_handler)
+    if handler is not None:
+        records, dropped = handler.drain()
+        for fields in records:
+            write_json_line(fields)
+        if dropped:
+            write_json_line(record_fields(logging.LogRecord(__name__, logging.WARNING, __file__, 0,
+                                                            f'{dropped} log records were dropped (rate or queue limit)',
+                                                            (), None)))
+
+
+def write_json_line(fields: dict):
+    """One record, in wire form, straight to the stderr channel (used when the socket is not available)."""
+    stream = _stderr_handler.stream if isinstance(_stderr_handler, logging.StreamHandler) else sys.stderr
+    try:
+        stream.write(json.dumps(fields, default=str) + '\n')
+        stream.flush()
+    except (OSError, ValueError):
+        pass
 
 
 def _log_uncaught(exc_type, exc_value, exc_traceback):
@@ -169,7 +274,7 @@ def configure_logging(level: str | int | None = None, *, json_lines: bool | None
     the default is INFO. Also routes what would bypass logging: Python warnings, uncaught exceptions, gevent's
     greenlet tracebacks and, on the JSON channel, anything printed to stdout. Returns the handler installed.
     """
-    global _configured
+    global _configured, _json_lines, _stderr_handler
     level = level or environ.get(LOG_LEVEL_ENV) or logging.INFO
     if isinstance(level, str) and level.isdigit():
         level = int(level)
@@ -196,6 +301,8 @@ def configure_logging(level: str | int | None = None, *, json_lines: bool | None
         # proxy's logger hierarchy and level gate.
         sys.stdout = LoggingWriter(logging.getLogger('stdout'), logging.INFO, wrapped=sys.stdout, name='stdout')
     _configured = True
+    _json_lines = bool(json_lines) and not log_file
+    _stderr_handler = handler
     remove_library_handlers()
     return handler
 
@@ -233,6 +340,23 @@ def proxy_logger_name(proxy_class_name: str, proxy_name: str) -> str:
     return f'{PROXIES_LOGGER}.{proxy_class_name}.{safe}'
 
 
+def record_from_fields(fields: dict, *, logger_name: str, channel: str = 'socket', pid: int | None = None,
+                       process_name: str | None = None) -> logging.LogRecord:
+    """Rebuild a record from its wire fields (a JSON line or one entry of a LOG batch), attributed to
+    ``logger_name`` with its own logger name in ``remote_name`` and the channel it arrived by in ``channel``."""
+    fields = dict(fields)
+    fields.pop('args', None)        # already interpolated into msg by the sender
+    record = logging.makeLogRecord(fields)
+    record.remote_name = record.name
+    record.name = logger_name
+    record.channel = channel
+    if pid is not None and not getattr(record, 'process', None):
+        record.process = pid
+    if process_name is not None:
+        record.processName = process_name
+    return record
+
+
 def record_from_line(raw_line: bytes | str, *, logger_name: str, stream_name: str = 'stderr',
                      default_level: int | None = None, pid: int | None = None,
                      process_name: str | None = None) -> logging.LogRecord | None:
@@ -252,28 +376,47 @@ def record_from_line(raw_line: bytes | str, *, logger_name: str, stream_name: st
         return None
     if default_level is None:
         default_level = STREAM_DEFAULT_LEVELS.get(stream_name, logging.WARNING)
-    record = None
     if line.startswith('{') and line.endswith('}'):
         try:
             fields = json.loads(line)
             if isinstance(fields, dict) and 'msg' in fields:
-                fields.pop('args', None)        # already interpolated into msg by the sender
-                record = logging.makeLogRecord(fields)
-                record.remote_name = record.name
+                return record_from_fields(fields, logger_name=logger_name, channel=stream_name, pid=pid,
+                                          process_name=process_name)
         except (ValueError, TypeError):
-            record = None
-    if record is None:
-        level = default_level
-        if len(line) > 2 and line[0] == '<' and line[2] == '>' and line[1].isdigit():
-            level, line = SYSLOG_LEVELS.get(int(line[1]), default_level), line[3:]
-        record = logging.LogRecord(logger_name, level, f'<{stream_name}>', 0, line, (), None)
-        record.remote_name = stream_name
-        if pid is not None:
-            record.process = pid
-    record.name = logger_name
+            pass
+    level = default_level
+    if len(line) > 2 and line[0] == '<' and line[2] == '>' and line[1].isdigit():
+        level, line = SYSLOG_LEVELS.get(int(line[1]), default_level), line[3:]
+    record = logging.LogRecord(logger_name, level, f'<{stream_name}>', 0, line, (), None)
+    record.remote_name = stream_name
+    record.channel = stream_name
+    if pid is not None:
+        record.process = pid
     if process_name is not None:
         record.processName = process_name
     return record
+
+
+def handle_log_batch(payload: bytes | str, logger: logging.Logger, *, pid: int | None = None,
+                     process_name: str | None = None) -> int:
+    """Handle one LOG batch from a proxy: ``{"records": [fields...], "dropped": n}``. Each record goes through
+    ``logger`` like a line from the proxy's stderr; a dropped count becomes one WARNING. Returns the records handled."""
+    message = json.loads(payload if isinstance(payload, str) else payload.decode('utf8'))
+    handled = 0
+    for fields in message.get('records', []):
+        try:
+            record = record_from_fields(fields, logger_name=logger.name, channel='socket', pid=pid,
+                                        process_name=process_name)
+        except Exception as e:  # pragma: no cover - defensive: one bad record must not lose the batch
+            _log.error(f'Unable to rebuild a log record from {logger.name}: {e}')
+            continue
+        if logger.isEnabledFor(record.levelno):
+            logger.handle(record)
+        handled += 1
+    if dropped := message.get('dropped'):
+        logger.warning(f'{process_name or logger.name} dropped {dropped} log records (rate or queue limit).',
+                       extra={'remote_name': __name__, 'channel': 'socket'})
+    return handled
 
 
 def log_entries(stream: Iterable[bytes], logger: logging.Logger, *, stream_name: str = 'stderr',
