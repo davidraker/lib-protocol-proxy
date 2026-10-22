@@ -10,6 +10,7 @@ from typing import ClassVar
 from uuid import UUID
 
 from ..ipc import IPCConnector, ProtocolProxyMessage, ProtocolProxyPeer, SocketParams
+from ..logs import guard_logging
 
 _log = logging.getLogger(__name__)
 
@@ -43,6 +44,12 @@ class ProtocolProxy(IPCConnector, metaclass=abc.ABCMeta):
         self._parent_pid: int = os.getppid()
         self._manager_lost: bool = False
         self.apply_plugins()
+
+    def guard_logging(self):
+        """Run from start(), once the protocol library is imported: strip handlers a library installed on its own
+        loggers (they would print a second, plain copy of every record), logging which loggers had them. A no-op
+        unless this process was configured by the launcher (see protocol_proxy.logs)."""
+        guard_logging()
 
     def manager_alive(self) -> bool:
         """Whether the process that launched this proxy is still its parent (an orphan is re-parented)."""

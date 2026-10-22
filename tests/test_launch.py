@@ -9,7 +9,7 @@ from uuid import uuid4
 import pytest
 
 from protocol_proxy.ipc import SocketParams
-from protocol_proxy.manager.base import ProtocolProxyManager
+from protocol_proxy.logs import record_from_line
 import importlib
 
 launch_module = importlib.import_module('protocol_proxy.proxy.launch')
@@ -24,16 +24,17 @@ def test_str2bool():
         str2bool('maybe')
 
 
-def test_json_formatter_roundtrips_quotes_through_manager_parser(caplog):
-    record = logging.LogRecord('some.proxy', logging.WARNING, __file__, 12, 'Namespace(name="x", y=\'z\')', None, None)
+def test_json_formatter_roundtrips_quotes_through_manager_reader():
+    record = logging.LogRecord('some.proxy', logging.WARNING, __file__, 12, 'Namespace(name="x", y=%r)', ('z',), None)
     line = JsonLineFormatter().format(record)
     parsed = json.loads(line)
-    assert parsed == {'name': 'some.proxy', 'lineno': 12, 'level': 'WARNING', 'message': 'Namespace(name="x", y=\'z\')'}
-    with caplog.at_level(logging.DEBUG):
-        ProtocolProxyManager.log_subprocess_output_line(line.encode('utf8'))
-    assert caplog.records[-1].name == 'some.proxy'
-    assert caplog.records[-1].levelno == logging.WARNING
-    assert 'Namespace(name="x"' in caplog.records[-1].getMessage()
+    assert parsed['name'] == 'some.proxy' and parsed['levelno'] == logging.WARNING and parsed['levelname'] == 'WARNING'
+    assert parsed['lineno'] == 12 and parsed['pathname'] == __file__ and parsed['msg'] == 'Namespace(name="x", y=\'z\')'
+    assert 'args' not in parsed and 'exc_info' not in parsed and parsed['process'] == record.process
+    rebuilt = record_from_line(line.encode('utf8'), logger_name='protocol_proxy.proxies.P.n')
+    assert rebuilt.name == 'protocol_proxy.proxies.P.n' and rebuilt.remote_name == 'some.proxy'
+    assert rebuilt.levelno == logging.WARNING and rebuilt.getMessage() == 'Namespace(name="x", y=\'z\')'
+    assert rebuilt.lineno == 12 and rebuilt.created == record.created
 
 
 def test_read_tokens():

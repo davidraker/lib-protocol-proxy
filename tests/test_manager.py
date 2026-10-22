@@ -1,5 +1,7 @@
 import io
 import json
+import logging
+import os
 import time
 
 from types import SimpleNamespace
@@ -28,8 +30,31 @@ def test_command_line_skips_none_and_manager_only_kwargs():
     # DummyProxy is a GeventProtocolProxy, so the entry point is told to monkey-patch before importing it.
     assert command[1:5] == ['-m', 'protocol_proxy.proxy', '--gevent', f'{DummyProxy.__module__}:DummyProxy']
     tail = command[command.index('--host'):]
-    assert tail == ['--host', 'h', '--port', '1', '--tls', 'True']
+    level = logging.getLevelName(logging.getLogger('protocol_proxy.proxies.DummyProxy.dummy_x').getEffectiveLevel())
+    assert tail == ['--host', 'h', '--port', '1', '--tls', 'True', '--log-level', level]
     assert '--manager-callbacks' not in command and '--password' not in command
+
+
+def test_command_line_log_level_follows_the_proxy_logger_unless_given():
+    manager = GeventProtocolProxyManager(proxy_class=DummyProxy)
+    manager.inbound_params = SocketParams('127.0.0.1', 22801)
+    logger = logging.getLogger("protocol_proxy.proxies.DummyProxy.dummy_192_168_0_1_502")
+    logger.setLevel(logging.DEBUG)
+    try:
+        command, *_ = manager._setup_proxy_process_command(('dummy', '192.168.0.1', 502))
+        assert command[command.index('--log-level') + 1] == 'DEBUG'
+        command, *_ = manager._setup_proxy_process_command(('dummy', '192.168.0.1', 502), log_level='ERROR')
+        assert command[command.index('--log-level') + 1] == 'ERROR'
+    finally:
+        logger.setLevel(logging.NOTSET)
+
+
+def test_launched_process_gets_the_manager_marker_in_its_environment():
+    manager = _manager()
+    with mock.patch('protocol_proxy.manager.gevent.Popen', FakeProcess) as popen, mock.patch('atexit.register'):
+        manager.get_proxy(('dummy', 'x'))
+    env = FakeProcess.last_kwargs['env']
+    assert env['_LAUNCHED_BY_PROXY_MANAGER'] == '1' and env['PATH'] == os.environ['PATH']
 
 
 def test_class_get_proxy_pops_manager_callbacks():
@@ -46,7 +71,10 @@ class FakeProcess:
     """A launched proxy process that exits when the test says so."""
     _pids = iter(range(1000, 2000))
 
+    last_kwargs: dict = {}
+
     def __init__(self, *args, **kwargs):
+        FakeProcess.last_kwargs = kwargs
         self.pid = next(self._pids)
         self.stdin = io.BytesIO()
         self.stdout, self.stderr = io.BytesIO(b''), io.BytesIO(b'')

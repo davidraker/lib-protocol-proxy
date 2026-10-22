@@ -85,6 +85,7 @@ class AsyncioProtocolProxy(AsyncioIPCConnector, ProtocolProxy, ABC):
 
     async def start(self):
         """Create the inbound server, register with the manager, then serve until stopped, terminated or orphaned."""
+        self.guard_logging()
         await super(AsyncioProtocolProxy, self).start()
         if not await self.send_registration(cast(AsyncioProtocolProxyPeer, self.peers[self.manager])):
             raise RuntimeError(f'{self.proxy_name}: registration with the Proxy Manager failed.')

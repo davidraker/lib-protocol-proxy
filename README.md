@@ -54,6 +54,28 @@ seconds, 1.0 by default). If the manager process dies, the proxy calls `on_manag
 so an orphaned proxy releases its sockets instead of competing with the replacement a restarted manager launches. A
 protocol proxy that holds state may override `on_manager_lost` to flush it first.
 
+## Logging
+
+A proxy launched by a manager logs through one channel: every record is one JSON object per line on **stderr**, with
+the `LogRecord` attribute names (`name`, `levelno`, `levelname`, `pathname`, `lineno`, `funcName`, `created`,
+`msecs`, `process`, `msg` already interpolated, and `exc_text` holding the formatted traceback). The manager reads
+both pipes (`protocol_proxy.logs.log_entries`) and rebuilds each record with `logging.makeLogRecord`, so proxy
+records appear in the manager's log with the proxy's file, line and PID; the proxy's own logger name is kept in
+`remote_name` and the record is handled by the logger `protocol_proxy.proxies.<ProxyClass>.<proxy name>` (the name
+reduced to logger-safe characters). That logger's effective level gates the records and is passed to the proxy as
+`--log-level`, so operators tune a proxy like any other logger. Plain lines are classified by stream (stdout INFO,
+stderr WARNING) or by a syslog-style `<N>` prefix (`<7>` debug ... `<2>` critical), the same rules VOLTTRON applies
+to agent output.
+
+Inside the proxy, `configure_logging` (run by the launcher, re-checked at `start()`) also captures what would bypass
+`logging`: Python warnings (`py.warnings`), uncaught exceptions (`protocol_proxy.uncaught`), gevent greenlet
+tracebacks (`gevent.hub`, one record per failure) and anything printed to stdout (`stdout`, INFO). Handlers that a
+library installs on its own loggers are removed, with a WARNING naming the logger, so each record reaches the channel
+once; protocol proxies should set library log levels (`logging.getLogger('pymodbus').setLevel(...)`) rather than
+call a library's logging setup. The JSON channel is used only when `_LAUNCHED_BY_PROXY_MANAGER` is in the
+environment and stderr is a pipe; a proxy run by hand logs readable text. `PROTOCOL_PROXY_LOG` sends the readable
+text to a file instead, and `PROTOCOL_PROXY_LOG_LEVEL` sets the level when no `--log-level` is given.
+
 # Disclaimer Notice
 
 This material was prepared as an account of work sponsored by an agency of the

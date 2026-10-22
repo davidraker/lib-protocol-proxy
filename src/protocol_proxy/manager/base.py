@@ -1,5 +1,6 @@
 import json
 import logging
+import os
 import sys
 
 from abc import abstractmethod, ABC
@@ -10,6 +11,7 @@ from uuid import uuid4, UUID
 from weakref import WeakMethod, WeakValueDictionary
 
 from ..ipc import IPCConnector, ProtocolHeaders, ProtocolProxyPeer, SocketParams
+from ..logs import LAUNCHED_BY_MANAGER_ENV, log_entries, proxy_logger_name
 from ..proxy import ProtocolProxy
 
 _log = logging.getLogger(__name__)
@@ -66,6 +68,8 @@ class ProtocolProxyManager(IPCConnector, ABC):
             #_log.debug(f'@@@@@@@@@ PROXY_ID IS NOT IN PEERS. SETTING UP COMMAND.')
             module, func = self.proxy_class.__module__, self.proxy_class.__name__
             kwargs = {k: v for k, v in kwargs.items() if k != 'manager_callbacks' and v is not None}
+            # The proxy logs at the level this manager would handle its records at, unless the caller chose one.
+            kwargs.setdefault('log_level', logging.getLevelName(self.proxy_logger(proxy_name).getEffectiveLevel()))
             protocol_specific_params = [i for pair in [(f"--{k.replace('_', '-')}", str(v))
                                                        for k, v in kwargs.items()] for i in pair]
             # Launched through the generic entry point so the proxy module is imported exactly once (see launch.main).
@@ -165,23 +169,19 @@ class ProtocolProxyManager(IPCConnector, ABC):
                 return manager, manager.peers[proxy_id]
         return None, None
 
-    @abstractmethod
-    def log_subprocess_output(self, stream):
-        pass
+    def proxy_logger(self, proxy_name: str) -> logging.Logger:
+        """The logger a launched proxy's records are handled through in this process:
+        ``protocol_proxy.proxies.<ProxyClass>.<proxy name>``. Its effective level gates the records and is passed
+        to the proxy as ``--log-level``, so operators tune a proxy like any other logger."""
+        return logging.getLogger(proxy_logger_name(self.proxy_class.__name__, proxy_name))
 
     @staticmethod
-    def log_subprocess_output_line(raw_line):
-        line = raw_line.decode().strip()
-        try:
-            try:
-                entry = json.loads(line)
-                log = logging.getLogger(entry['name'])
-                log.log(logging.getLevelName(entry['level'].upper()), f":{entry['lineno']} {entry['message']}")
-            except (json.JSONDecodeError, KeyError, TypeError):
-                log = logging.getLogger(__name__)
-                log.log(logging.ERROR, line)
-        except UnicodeDecodeError:
-            log = logging.getLogger(__name__)
-            log.log(logging.ERROR, raw_line)
-        except Exception as e:
-            _log.error(f'Encountered unknown exception parsing logs from proxy: {e}')
+    def proxy_environment() -> dict[str, str]:
+        """Environment for a launched proxy: the manager's, plus the marker that selects the JSON log channel."""
+        return {**os.environ, LAUNCHED_BY_MANAGER_ENV: '1'}
+
+    def log_subprocess_output(self, stream, logger: logging.Logger, stream_name: str = 'stderr',
+                              pid: int | None = None, process_name: str | None = None):
+        """Read one of a launched proxy's pipes to its end, handling each line as a record of ``logger`` (see
+        protocol_proxy.logs.log_entries). Asyncio managers override this with a coroutine."""
+        log_entries(iter(stream.readline, b''), logger, stream_name=stream_name, pid=pid, process_name=process_name)

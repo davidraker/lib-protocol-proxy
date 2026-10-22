@@ -10,6 +10,7 @@ from typing import Type
 
 from ..ipc import callback, ProtocolHeaders, ProtocolProxyPeer
 from ..ipc.asyncio import AsyncioIPCConnector, AsyncioProtocolProxyPeer
+from ..logs import log_entries
 from ..proxy import ProtocolProxy
 from . import ProtocolProxyManager
 
@@ -41,9 +42,12 @@ class AsyncioProtocolProxyManager(ProtocolProxyManager, AsyncioIPCConnector, ABC
         command, proxy_id, proxy_name = self._setup_proxy_process_command(unique_remote_id, **kwargs)  # , proxy_env
         if command:
             proxy_process = await asyncio.create_subprocess_exec(*command, stdin=asyncio.subprocess.PIPE,
-                                                    stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
-            self.loop.create_task(self.log_subprocess_output(proxy_process.stdout))
-            self.loop.create_task(self.log_subprocess_output(proxy_process.stderr))
+                                                    stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+                                                    env=self.proxy_environment())
+            logger = self.proxy_logger(proxy_name)
+            for stream_name in ('stdout', 'stderr'):
+                self.loop.create_task(self.log_subprocess_output(getattr(proxy_process, stream_name), logger,
+                                                                 stream_name, proxy_process.pid, proxy_name))
             _log.info(f"PPM: Created new ProtocolProxy {proxy_name} with ID {str(proxy_id)}, pid: {proxy_process.pid}")
             peer_token = uuid4()
             proxy_process.stdin.write(peer_token.hex.encode())
@@ -56,10 +60,11 @@ class AsyncioProtocolProxyManager(ProtocolProxyManager, AsyncioIPCConnector, ABC
             atexit.register(self.finalize_process, proxy_process)
         return self.peers[proxy_id]
 
-    async def log_subprocess_output(self, stream: StreamReader):
+    async def log_subprocess_output(self, stream: StreamReader, logger: logging.Logger, stream_name: str = 'stderr',
+                                    pid: int | None = None, process_name: str | None = None):
         while not stream.at_eof():
             raw_line = await stream.readline()
-            self.log_subprocess_output_line(raw_line)
+            log_entries([raw_line], logger, stream_name=stream_name, pid=pid, process_name=process_name)
 
     @callback
     async def handle_peer_registration(self, headers: ProtocolHeaders, raw_message: bytes):

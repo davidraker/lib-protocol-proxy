@@ -1,45 +1,18 @@
-import json
 import logging
 import sys
 
 from argparse import ArgumentParser, ArgumentTypeError
 from asyncio import iscoroutinefunction, run
 from importlib import import_module
-from os import environ
 from typing import Callable
 from uuid import UUID
 
 from ..ipc import SocketParams
+from ..logs import JsonLineFormatter, configure_logging    # noqa: F401  (re-exported; tests patch configure_logging)
 
 _log = logging.getLogger(__name__)
 
 TOKEN_HEX_LENGTH = 32
-
-
-class JsonLineFormatter(logging.Formatter):
-    """Emit one JSON object per line. ProtocolProxyManager.log_subprocess_output_line parses these
-    and re-logs them in the manager's process, so every field must be JSON-escaped."""
-
-    def format(self, record: logging.LogRecord) -> str:
-        message = record.getMessage()
-        if record.exc_info:
-            message = f'{message}\n{self.formatException(record.exc_info)}'
-        return json.dumps({'name': record.name, 'lineno': record.lineno, 'level': record.levelname,
-                           'message': message})
-
-
-def configure_logging(level: str | int | None = None):
-    """Route all logging to stdout (or the file named by PROTOCOL_PROXY_LOG) as JSON lines."""
-    level = level or environ.get('PROTOCOL_PROXY_LOG_LEVEL', 'INFO')
-    if log_file := environ.get('PROTOCOL_PROXY_LOG'):
-        handler: logging.Handler = logging.FileHandler(log_file)
-    else:
-        handler = logging.StreamHandler(sys.stdout)
-    handler.setFormatter(JsonLineFormatter())
-    root = logging.getLogger()
-    root.handlers.clear()
-    root.addHandler(handler)
-    root.setLevel(level)
 
 
 SENSITIVE_KEYS = ('password', 'token', 'secret', 'credential')
@@ -79,7 +52,8 @@ def proxy_command_parser(parser: ArgumentParser = None):
     parser.add_argument('--inbound-port', type=int, default=None,
                         help='Port of the inbound socket from the Proxy Manager. Chosen automatically if omitted.')
     parser.add_argument('--log-level', type=str, default=None,
-                        help='Logging level for the proxy process (default: PROTOCOL_PROXY_LOG_LEVEL or INFO).')
+                        help='Logging level for the proxy process (default: PROTOCOL_PROXY_LOG_LEVEL or INFO). A manager passes'
+                             ' the effective level of its protocol_proxy.proxies.<Class>.<name> logger.')
     return parser
 
 

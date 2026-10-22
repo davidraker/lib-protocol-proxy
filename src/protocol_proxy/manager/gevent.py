@@ -7,7 +7,7 @@ from gevent import spawn
 from gevent.subprocess import Popen, PIPE
 from gevent.timeout import Timeout
 from uuid import uuid4
-from typing import IO, Type
+from typing import Type
 
 from ..ipc import callback, ProtocolHeaders, ProtocolProxyPeer
 from ..ipc.gevent import GeventIPCConnector, GeventProtocolProxyPeer
@@ -68,16 +68,17 @@ class GeventProtocolProxyManager(ProtocolProxyManager, GeventIPCConnector, ABC):
             peer = GeventProtocolProxyPeer(process=None, proxy_id=proxy_id, token=uuid4())
             self.peers[proxy_id] = peer
             try:
-                proxy_process = Popen(command, stdin=PIPE, stdout=PIPE, stderr=PIPE)
+                proxy_process = Popen(command, stdin=PIPE, stdout=PIPE, stderr=PIPE, env=self.proxy_environment())
             except Exception:
                 if self.peers.get(proxy_id) is peer:
                     del self.peers[proxy_id]
                 raise
             peer.process = proxy_process
             _log.info(f'proxy {proxy_name} has PID {proxy_process.pid}')
-            spawn(self.log_subprocess_output, proxy_process.stdout)
-            spawn(self.log_subprocess_output, proxy_process.stderr)
-            # TODO: Ensure that logging as implemented fits with VOLTTRON logging once that is fixed..
+            logger = self.proxy_logger(proxy_name)
+            for stream_name in ('stdout', 'stderr'):
+                spawn(self.log_subprocess_output, getattr(proxy_process, stream_name), logger, stream_name,
+                      proxy_process.pid, proxy_name)
             _log.info(f"PPM: Created new ProtocolProxy {proxy_name} with ID {str(proxy_id)}, pid: {proxy_process.pid}")
             proxy_process.stdin.write(peer.token.hex.encode())
             proxy_process.stdin.write(self.token.hex.encode())
@@ -90,11 +91,6 @@ class GeventProtocolProxyManager(ProtocolProxyManager, GeventIPCConnector, ABC):
             _log.info(f"PPM: Proxy {proxy_id} created, waiting for registration before sending.")
         #_log.debug(f'@@@@@@@ GET_PROXY WILL RETURN PEER: {self.peers[proxy_id]} @@@@@@@')
         return self.peers[proxy_id]
-
-    def log_subprocess_output(self, stream: IO[bytes]):
-        """Reads lines from a pipe and logs them."""
-        for raw_line in iter(stream.readline, b''):
-            self.log_subprocess_output_line(raw_line)
 
     @callback
     def handle_peer_registration(self, headers: ProtocolHeaders, raw_message: bytes):

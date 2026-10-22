@@ -90,6 +90,7 @@ class GeventProtocolProxy(GeventIPCConnector, ProtocolProxy, ABC):
 
     def start(self, *_, **__) -> list[Greenlet]:
         """Create the inbound socket, then start the accept loop, registration, main loop and manager watchdog."""
+        self.guard_logging()
         super(GeventProtocolProxy, self).start()
         if self._signal_watcher is None:
             self._signal_watcher = signal_handler(signal.SIGTERM, self._on_terminate_signal)
