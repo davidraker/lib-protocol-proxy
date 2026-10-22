@@ -155,3 +155,16 @@ def test_asyncio_receives_frames_larger_than_its_buffer_and_across_the_ring_end(
         await asyncio.sleep(0)
         assert got[1:] == [(10 + i, p) for i, p in enumerate(payloads)]
     asyncio.run(main())
+
+
+def test_keep_alive_bit_round_trips_in_both_versions():
+    from uuid import uuid4
+    from protocol_proxy.ipc import HeadersV1, HeadersV2
+    sender, token = uuid4(), uuid4()
+    for cls in (HeadersV1, HeadersV2):
+        packed = cls(3, 'M', 7, sender, token, response_expected=True, keep_alive=True).pack()
+        headers = cls.unpack(packed[2:])
+        assert headers.keep_alive and headers.response_expected and headers.request_id == 7
+        plain = cls.unpack(cls(3, 'M', 7, sender, token).pack()[2:])
+        assert not plain.keep_alive and not plain.response_expected
+    assert HeadersV1.KEEP_ALIVE_BIT == 3 and HeadersV2.KEEP_ALIVE_BIT == 3

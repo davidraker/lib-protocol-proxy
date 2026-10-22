@@ -13,6 +13,7 @@ from weakref import WeakMethod, WeakValueDictionary
 from ..ipc import IPCConnector, ProtocolHeaders, ProtocolProxyPeer, SocketParams
 from ..logs import LAUNCHED_BY_MANAGER_ENV, log_entries, proxy_logger_name
 from ..proxy import ProtocolProxy
+from ..proxy.launch import str2bool
 
 _log = logging.getLogger(__name__)
 
@@ -168,6 +169,14 @@ class ProtocolProxyManager(IPCConnector, ABC):
             if proxy_id in manager.peers:
                 return manager, manager.peers[proxy_id]
         return None, None
+
+    @staticmethod
+    def peer_policy(kwargs: dict) -> bool | None:
+        """The connection policy for a proxy launched with these options: ``persistent`` (bool or its command-line
+        spelling) when given, else None for the manager's default. The option travels to the proxy as ``--persistent``
+        with every other kwarg, so both ends apply the same policy."""
+        value = kwargs.get('persistent')
+        return None if value is None else str2bool(value)
 
     def proxy_logger(self, proxy_name: str) -> logging.Logger:
         """The logger a launched proxy's records are handled through in this process:

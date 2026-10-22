@@ -54,6 +54,31 @@ seconds, 1.0 by default). If the manager process dies, the proxy calls `on_manag
 so an orphaned proxy releases its sockets instead of competing with the replacement a restarted manager launches. A
 protocol proxy that holds state may override `on_manager_lost` to flush it first.
 
+## Connections
+
+A connector sends a message by dialling a TCP connection, writing one frame (header then payload) and, when a reply
+is expected, reading the `RESPONSE` frame back before closing: one connection per message. That is the default and
+what every proxy did before persistent connections existed. Connection lifetime is a policy per peer
+(`ProtocolProxyPeer.persistent`, defaulting to the connector's `persistent` option): a persistent peer has one
+connection carrying frames in both directions, dialled on the first send and redialled on demand after a loss.
+Responses are matched by request id, so requests interleave; handlers for frames on a persistent connection run
+concurrently, so a slow one does not hold up the frames behind it. A frame larger than `persistent_max_frame`
+(256 KiB) takes its own connection so a multi-megabyte registration does not delay the frames behind it. When a
+connection is lost, the requests still awaiting responses on it fail with `ConnectionError` instead of waiting out
+their timeouts.
+
+A receiver reads frames until the sender closes, so either policy works against either peer. The sender sets the
+header's keep-alive bit (bit 3 of `bitflags`) on frames it sends over a persistent connection; a receiver that sees
+the bit on an accepted connection from an authenticated peer adopts that connection as its way back to the peer.
+This is how a manager reaches a proxy whose address it cannot dial (a remote proxy that dialled in through NAT or an
+SSH tunnel): the proxy registers over its persistent connection and every request to it travels back on the same
+one. Persistent sockets have TCP keepalive enabled so a vanished peer is noticed within about a minute; the
+heartbeat planned for liveness will shorten that.
+
+To run a proxy persistently, pass `persistent=True` to `get_proxy` (it reaches the proxy as `--persistent True`, so
+both ends apply the same policy). Local proxies stay per-message by default until persistence has run in the
+real-platform matrix for a while.
+
 ## Logging
 
 A proxy launched by a manager logs through one channel: every record is one JSON object per line on **stderr**, with

@@ -1,5 +1,6 @@
 import json
 import logging
+import socket as _socket
 import struct
 
 from dataclasses import dataclass, field
@@ -28,6 +29,39 @@ class GeventProtocolProxyPeer(ProtocolProxyPeer):
         self.registered.set()
 
     ready: RLock = field(default_factory=RLock)     # one lock per peer; a shared default would serialize every peer
+    connect_lock: RLock = field(default_factory=RLock)      # one dial at a time toward this peer
+
+
+class GeventConnection:
+    """One TCP connection: a socket, a serialised writer and, for a connection that stays open, the request ids
+    awaiting responses on it (failed when the connection is lost). ``peer_id`` is the authenticated peer at the other
+    end once known. Per-message connections carry one frame and its reply; persistent ones carry frames in both
+    directions until a side closes."""
+
+    def __init__(self, sock: socket, persistent: bool = False, peer_id: UUID | None = None):
+        self.sock = sock
+        self.persistent = persistent
+        self.peer_id = peer_id
+        self.write_lock = RLock()
+        self.pending: set[int] = set()
+        self.closed = Event()
+
+    @property
+    def alive(self) -> bool:
+        return not self.closed.is_set()
+
+    def write(self, data: bytes):
+        with self.write_lock:
+            self.sock.sendall(data)
+
+    def close(self):
+        if not self.closed.is_set():
+            self.closed.set()
+            GeventIPCConnector._close(self.sock)
+
+    def __repr__(self):
+        kind = 'persistent' if self.persistent else 'per-message'
+        return f'GeventConnection({kind}, {GeventIPCConnector._peer_name(self.sock)}, peer={self.peer_id})'
 
 
 class GeventIPCConnector(IPCConnector):
@@ -35,11 +69,16 @@ class GeventIPCConnector(IPCConnector):
 
     Sockets are gevent sockets left in blocking mode: gevent keeps the descriptor non-blocking and parks the calling
     greenlet on the hub until the descriptor is ready, so every wait here is event-driven and costs no polling.
-    One greenlet accepts connections and spawns a greenlet per connection; ``send`` spawns a greenlet per message.
-    Connection lifetime is one frame per connection (the sender closes, or reads one reply and closes); ``_read_frame``
-    and ``_dispatch`` do not depend on that, so a persistent connection is a reader that loops instead of closing.
+    One greenlet accepts connections and spawns a reader greenlet per connection, which serves frames until the
+    other side closes. ``send`` dials a connection per message by default; toward a persistent peer it writes on the
+    peer's one open connection (dialling it if needed, under the peer's connect lock) and the reader on that
+    connection delivers the responses by request id. Handlers on a persistent connection run in their own greenlets,
+    so a slow one does not hold up the frames behind it.
     """
     LISTEN_BACKLOG = 128
+    # TCP keepalive on persistent connections: the kernel probes an idle connection after KEEPIDLE seconds, every
+    # KEEPINTVL seconds, and resets it after KEEPCNT failed probes, so a vanished peer is noticed in under a minute.
+    KEEPALIVE = {'TCP_KEEPIDLE': 15, 'TCP_KEEPINTVL': 5, 'TCP_KEEPCNT': 4}
 
     def __init__(self, *, proxy_id: UUID, token: UUID, proxy_name: str = None, inbound_params: SocketParams = None,
                  chunk_size: int = 1024, encrypt: bool = False, min_port: int = 22801, max_port: int = 22899,
@@ -50,7 +89,7 @@ class GeventIPCConnector(IPCConnector):
                                                  min_port=min_port, max_port=max_port, **kwargs)
         self.max_io_wait_seconds = max_io_wait_seconds  # deadline for any single socket operation, and for connect
         self.response_results: WeakValueDictionary[int, AsyncResult] = WeakValueDictionary()
-        self.connections: set[socket] = set()           # open connections, closed when the loop stops
+        self.connections: set[GeventConnection] = set()     # open connections, closed when the connector stops
         self._stop = False
         self._serving = False
         self._served = Event()                          # set when the accept loop has exited
@@ -103,12 +142,21 @@ class GeventIPCConnector(IPCConnector):
         else:
             result.set(raw_message)
 
+    def _fail_result(self, result: AsyncResult, error: Exception):
+        if not result.ready():
+            result.set_exception(error)
+
     # ---- sending -------------------------------------------------------------------------------------------------
     def send(self, remote: ProtocolProxyPeer, message: ProtocolProxyMessage) -> bool | AsyncResult:
         """Send a message to the remote. Returns False when it cannot be attempted, an AsyncResult for the reply when
         one is expected, else True. The peer's ``ready`` lock is taken in the caller's greenlet, as it is re-entrant
         there for a post-registration function sending from inside ``wait_peer_registered``. Delivery itself runs in
-        its own greenlet; a delivery failure is logged and leaves the AsyncResult unset for the caller's own timeout.
+        its own greenlet; a delivery failure is logged and fails the AsyncResult (or leaves it to the caller's
+        timeout when the failure is the peer's silence).
+
+        An open persistent connection to the peer is used when there is one. Otherwise a persistent peer gets one
+        dialled, and any other peer gets a connection for this message alone. A frame larger than
+        ``persistent_max_frame`` takes its own connection when the peer's address is known.
         """
         if not isinstance(remote, ProtocolProxyPeer):
             _log.error(f'{self.proxy_name}: send() requires a ProtocolProxyPeer, got {type(remote).__name__}: {remote}')
@@ -116,11 +164,14 @@ class GeventIPCConnector(IPCConnector):
         try:
             with remote.ready:
                 params = remote.socket_params
-                if (params is None or getattr(params, 'address', None) is None
-                        or getattr(params, 'port', None) is None):
-                    _log.error(f"Refusing to connect: remote SocketParams is invalid: {params}")
+                address = None
+                if params is not None and getattr(params, 'address', None) and getattr(params, 'port', None):
+                    address = (params.address, params.port)
+                link = remote.connection if remote.connection is not None and remote.connection.alive else None
+                if address is None and link is None:
+                    _log.error(f"{self.proxy_name}: Refusing to send to {remote.proxy_id}: no open connection and"
+                               f" its SocketParams are invalid: {params}")
                     return False
-                address = (params.address, params.port)
         except (OSError, Exception) as e:
             _log.warning(f"{self.proxy_name}: Unexpected error preparing to send to"
                          f" {getattr(remote, 'socket_params', remote)}: {e}")
@@ -132,20 +183,24 @@ class GeventIPCConnector(IPCConnector):
             self.response_results[message.request_id] = result
         else:
             result = True
-        spawn(self._deliver, address, message)
+        if link is not None or self.is_persistent(remote):
+            spawn(self._deliver_persistent, remote, address, message)
+        else:
+            spawn(self._deliver, address, message)
         return result
 
     def _deliver(self, address: tuple[str, int], message: ProtocolProxyMessage):
         """Connect, write the frame, and, when a reply is expected, read one frame back; then close."""
         sock = socket(AF_INET, SOCK_STREAM)
         sock.settimeout(self.max_io_wait_seconds)
-        self.connections.add(sock)
+        conn = GeventConnection(sock)
+        self.connections.add(conn)
         try:
             sock.connect(address)
-            sock.sendall(self._frame(message))
+            conn.write(self._frame(message))
             if message.response_expected:
                 if (frame := self._read_frame(sock)) is not None:
-                    self._dispatch(sock, *frame)
+                    self._dispatch(conn, *frame)
                 else:
                     _log.warning(f'{self.proxy_name}: {address} closed the connection without answering'
                                  f' {message.method_name} (request_id: {message.request_id}).')
@@ -153,26 +208,65 @@ class GeventIPCConnector(IPCConnector):
             if not self._stop:
                 _log.warning(f'{self.proxy_name}: Unable to send {message.method_name}'
                              f' (request_id: {message.request_id}) to {address}: {e}')
+            if message.response_expected:
+                self._fail_pending([message.request_id], ConnectionError(f'{message.method_name} to {address}: {e}'))
         finally:
-            self.connections.discard(sock)
-            self._close(sock)
+            self.connections.discard(conn)
+            conn.close()
+
+    def _deliver_persistent(self, remote: ProtocolProxyPeer, address: tuple[str, int] | None,
+                            message: ProtocolProxyMessage):
+        """Write the frame on the peer's persistent connection, dialling one first if there is none."""
+        frame = self._frame(message, keep_alive=True)
+        if address is not None and self.persistent_max_frame and len(frame) > self.persistent_max_frame:
+            return self._deliver(address, message)      # its own connection, so it does not delay the frames behind it
+        try:
+            conn = self._link(remote, address)
+            if message.response_expected:
+                conn.pending.add(message.request_id)
+            conn.write(frame)
+        except (OSError, Exception) as e:
+            if not self._stop:
+                _log.warning(f'{self.proxy_name}: Unable to send {message.method_name}'
+                             f' (request_id: {message.request_id}) to {remote.proxy_id}: {e}')
+            if message.response_expected:
+                self._fail_pending([message.request_id], ConnectionError(f'{message.method_name} to {remote.proxy_id}: {e}'))
+
+    def _link(self, remote: ProtocolProxyPeer, address: tuple[str, int] | None) -> GeventConnection:
+        """The peer's open persistent connection, dialled now if it has none and its address is known."""
+        with remote.connect_lock:
+            if (conn := remote.connection) is not None and conn.alive:
+                return conn
+            if address is None:
+                raise ConnectionError(f'no open connection to {remote.proxy_id} and no address to dial')
+            sock = socket(AF_INET, SOCK_STREAM)
+            sock.settimeout(self.max_io_wait_seconds)
+            try:
+                sock.connect(address)
+            except (OSError, Exception):
+                sock.close()
+                raise
+            conn = self._open(sock, persistent=True, peer_id=remote.proxy_id)
+            remote.connection = conn
+            _log.info(f'{self.proxy_name}: opened a persistent connection to {remote.proxy_id} @ {address}.')
+            return conn
 
     def _pack_headers(self, data_length: int, request_id: int, response_expected: bool, method_name: str,
-                      protocol_version: int = 1, remote_id=None) -> bytes:
+                      protocol_version: int = 1, remote_id=None, keep_alive: bool = False) -> bytes:
         if not (protocol := self.PROTOCOL_VERSION.get(protocol_version)):
             raise NotImplementedError(f'Unable to send with unknown proxy protocol version: {protocol_version}')
         extra = {'remote_id': remote_id} if protocol_version >= 2 else {}
         return protocol(data_length, method_name, request_id, self.proxy_id, self.token, response_expected,
-                        **extra).pack()
+                        keep_alive=keep_alive, **extra).pack()
 
-    def _frame(self, message: ProtocolProxyMessage) -> bytes:
+    def _frame(self, message: ProtocolProxyMessage, keep_alive: bool = False) -> bytes:
         """The wire bytes of a message: header then payload, written with one sendall."""
         payload = message.payload
         if isinstance(payload, (AsyncResult, Greenlet)):
             payload = payload.get()
         payload = b'' if payload is None else payload       # a handler that returned nothing still gets its reply out
         return self._pack_headers(len(payload), message.request_id, message.response_expected, message.method_name,
-                                  message.protocol_version, message.remote_id) + bytes(payload)
+                                  message.protocol_version, message.remote_id, keep_alive) + bytes(payload)
 
     # ---- receiving -----------------------------------------------------------------------------------------------
     def _recv_exact(self, sock: socket, length: int) -> bytes | None:
@@ -203,12 +297,12 @@ class GeventIPCConnector(IPCConnector):
             return None
         return headers, payload
 
-    def _dispatch(self, sock: socket, headers: ProtocolHeaders, payload: bytes):
-        """Run the handler for a frame and, if the handler provides a response, write it back on the same socket.
+    def _dispatch(self, conn: GeventConnection, headers: ProtocolHeaders, payload: bytes):
+        """Run the handler for a frame and, if the handler provides a response, write it back on the same connection.
         A handler that raises or exceeds its timeout answers with the same JSON error the asyncio connector sends."""
         if not (cb_info := self.find_callback(headers)):
             _log.warning(f'{self.proxy_name}: Received unknown method name: {headers.method_name}'
-                         f' from {self._peer_name(sock)} with request ID: {headers.request_id}')
+                         f' from {self._peer_name(conn.sock)} with request ID: {headers.request_id}')
             return
         try:
             result = with_timeout(cb_info.timeout, cb_info.method, self, headers, payload, timeout_value=_TIMED_OUT)
@@ -223,21 +317,88 @@ class GeventIPCConnector(IPCConnector):
             _log.warning(f'{self.proxy_name}: Callback {headers.method_name} raised: {e!r}')
             result = json.dumps({'status': 'error', 'error': repr(e), 'method': headers.method_name}).encode('utf8')
         if cb_info.provides_response:
-            sock.sendall(self._frame(ProtocolProxyMessage(method_name='RESPONSE', payload=result,
-                                                          request_id=headers.request_id)))
+            response = ProtocolProxyMessage(method_name='RESPONSE', payload=result, request_id=headers.request_id)
+            try:
+                conn.write(self._frame(response, keep_alive=conn.persistent))
+            except (OSError, Exception) as e:
+                if not self._stop:
+                    _log.warning(f'{self.proxy_name}: Unable to answer {headers.method_name}'
+                                 f' (request_id: {headers.request_id}) on {conn}: {e}')
+
+    def _adopt(self, conn: GeventConnection, headers: ProtocolHeaders):
+        """A frame with the keep-alive bit arrived on an accepted connection: the sender keeps it open, so if the
+        sender is an authenticated peer, send to it on this connection from now on (replacing any earlier one)."""
+        peer = self.peers.get(headers.sender_id)
+        if peer is None or peer.token != headers.sender_token:
+            _log.debug(f'{self.proxy_name}: not adopting a keep-alive connection from unauthenticated {headers.sender_id}')
+            return
+        self._make_persistent(conn, peer.proxy_id)
+        previous, peer.connection = peer.connection, conn
+        if previous is not None and previous is not conn and previous.alive:
+            _log.info(f'{self.proxy_name}: {peer.proxy_id} opened a new persistent connection; closing {previous}.')
+            previous.close()
+
+    def _make_persistent(self, conn: GeventConnection, peer_id: UUID):
+        conn.persistent, conn.peer_id = True, peer_id
+        conn.sock.settimeout(None)      # idle is normal on a persistent connection; keepalive notices a dead peer
+        try:
+            conn.sock.setsockopt(_socket.SOL_SOCKET, _socket.SO_KEEPALIVE, 1)
+            for name, value in self.KEEPALIVE.items():
+                if (option := getattr(_socket, name, None)) is not None:
+                    conn.sock.setsockopt(_socket.IPPROTO_TCP, option, value)
+        except OSError as e:
+            _log.debug(f'{self.proxy_name}: unable to set TCP keepalive on {conn}: {e}')
+
+    def _serve(self, conn: GeventConnection):
+        """Read and dispatch frames on a connection until the other side closes it (or it fails, or we stop)."""
+        reason = 'closed by the peer'
+        try:
+            while not self._stop:
+                if (frame := self._read_frame(conn.sock)) is None:
+                    break
+                headers, payload = frame
+                if headers.keep_alive and not conn.persistent:
+                    self._adopt(conn, headers)
+                if headers.method_name == 'RESPONSE':
+                    conn.pending.discard(headers.request_id)
+                if conn.persistent:
+                    spawn(self._dispatch, conn, headers, payload)   # a slow handler must not block the frames behind
+                else:
+                    self._dispatch(conn, headers, payload)
+                    break   # per message: one frame, its reply if any, then close (a sender owed no reply fails fast)
+        except (OSError, Exception) as e:
+            reason = str(e)
+            if not self._stop:
+                _log.warning(f'{self.proxy_name}: Error serving {conn}: {e}')
+        finally:
+            self._drop(conn, reason)
+
+    def _open(self, sock: socket, persistent: bool = False, peer_id: UUID | None = None) -> GeventConnection:
+        """Track a connected socket and start serving frames on it."""
+        conn = GeventConnection(sock, peer_id=peer_id)
+        if persistent:
+            self._make_persistent(conn, peer_id)
+        self.connections.add(conn)
+        spawn(self._serve, conn)
+        return conn
+
+    def _drop(self, conn: GeventConnection, reason: str):
+        """Forget a connection: close it, fail the requests still awaiting responses on it, and detach it from its
+        peer so the next send dials afresh."""
+        self.connections.discard(conn)
+        conn.close()
+        if conn.pending:
+            self._fail_pending(conn.pending, ConnectionError(f'connection to {conn.peer_id} lost: {reason}'))
+            conn.pending.clear()
+        if conn.peer_id is not None and (peer := self.peers.get(conn.peer_id)) is not None \
+                and peer.connection is conn:
+            peer.connection = None
+            if not self._stop:
+                _log.info(f'{self.proxy_name}: persistent connection to {conn.peer_id} {reason}.')
 
     def _handle_connection(self, sock: socket):
-        """Serve one accepted connection: one frame, its reply if any, then close."""
-        self.connections.add(sock)
-        try:
-            if (frame := self._read_frame(sock)) is not None:
-                self._dispatch(sock, *frame)
-        except (OSError, Exception) as e:
-            if not self._stop:
-                _log.warning(f'{self.proxy_name}: Error serving connection from {self._peer_name(sock)}: {e}')
-        finally:
-            self.connections.discard(sock)
-            self._close(sock)
+        """Serve one accepted connection (kept for callers of the old name)."""
+        self._serve(GeventConnection(sock))
 
     def select_loop(self):
         """Accept connections until ``stop()``; spawn this. The name is kept from the select-based implementation.
@@ -260,11 +421,9 @@ class GeventIPCConnector(IPCConnector):
                     sleep(0.1)      # do not spin on a persistent accept failure (e.g. out of descriptors)
                     continue
                 client.settimeout(self.max_io_wait_seconds)
-                spawn(self._handle_connection, client)
+                self._open(client)
         finally:
-            for s in list(self.connections):
-                self._close(s)
-            self.connections.clear()
+            self._close_connections()
             self._serving = False
             self._served.set()
 
@@ -273,11 +432,16 @@ class GeventIPCConnector(IPCConnector):
         self._setup_inbound_server(self.inbound_params)
 
     def stop(self):
-        """Stop accepting; the accept loop exits as soon as its socket is closed and then closes open connections."""
+        """Stop accepting and close every connection; the accept loop and the readers exit as their sockets close."""
         self._stop = True
         if (server := self.inbound_server_socket) is not None:
             self.inbound_server_socket = None
             self._close(server)
+        self._close_connections()
+
+    def _close_connections(self):
+        for conn in list(self.connections):
+            conn.close()
 
     @staticmethod
     def _close(sock: socket):

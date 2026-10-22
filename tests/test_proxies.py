@@ -128,7 +128,8 @@ def test_asyncio_run_callback_accepts_sync_and_async_callbacks():
         connector = mock.Mock(proxy_name='c', PROTOCOL_VERSION={1: mock.Mock(HEADER_LENGTH=10)})
         protocol = IPCProtocol(connector=connector)
         protocol.transport = mock.Mock()
-        protocol._message_to_bytes = lambda message: message.payload
+        protocol.transport.is_closing.return_value = False
+        protocol._message_to_bytes = lambda message, **kwargs: message.payload
         headers = SimpleNamespace(method_name='M', request_id=1)
 
         def sync_cb(conn, hdrs, data):

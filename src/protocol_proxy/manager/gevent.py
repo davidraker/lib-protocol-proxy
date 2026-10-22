@@ -65,7 +65,8 @@ class GeventProtocolProxyManager(ProtocolProxyManager, GeventIPCConnector, ABC):
         if command:
             # The peer is registered before the process is launched: launching yields to other greenlets, and a
             # concurrent get_proxy for the same key must find this peer rather than launch a second process.
-            peer = GeventProtocolProxyPeer(process=None, proxy_id=proxy_id, token=uuid4())
+            peer = GeventProtocolProxyPeer(process=None, proxy_id=proxy_id, token=uuid4(),
+                                           persistent=self.peer_policy(kwargs))
             self.peers[proxy_id] = peer
             try:
                 proxy_process = Popen(command, stdin=PIPE, stdout=PIPE, stderr=PIPE, env=self.proxy_environment())

@@ -53,6 +53,12 @@ class ProtocolProxyPeer(ABC):
     ready: Any
     token: UUID
     socket_params: SocketParams = None
+    #: Connection lifetime toward this peer: True keeps one connection open for every frame in both directions,
+    #: False dials a connection per message, None uses the connector's default (``IPCConnector.persistent``).
+    persistent: bool | None = None
+    #: The open persistent connection to this peer, if any: one this side dialled, or one the peer dialled and this
+    #: side adopted when a frame arrived on it with the keep-alive bit set.
+    connection: Any = None
 
     def mark_registered(self):
         """Called by the manager once this peer's address is known; a subclass may wake waiters here."""
@@ -61,15 +67,28 @@ class ProtocolProxyPeer(ABC):
 class IPCConnector(metaclass=ABCMeta):
     PROTOCOL_VERSION = {1: HeadersV1, 2: HeadersV2}
 
+    #: Frames larger than this (header and payload) take a dedicated per-message connection even toward a persistent
+    #: peer, so a multi-megabyte registration or profile does not hold every other frame behind it.
+    PERSISTENT_MAX_FRAME = 256 * 1024
+
     def __init__(self, *, proxy_id: UUID, token: UUID, proxy_name: str = None, inbound_params: SocketParams = None,
                  chunk_size: int = 1024, encrypt: bool = False, min_port: int = 22801, max_port: int = 22899,
-                 **kwargs):
+                 persistent: bool = False, persistent_max_frame: int | None = PERSISTENT_MAX_FRAME, **kwargs):
         """ Handles socket communication between ProtocolProxy and ProtocolProxyManager.
+
+        Connection lifetime is a policy per peer (``ProtocolProxyPeer.persistent``), defaulting to ``persistent``
+        here: per message (dial, one frame, its reply, close) or persistent (one connection per peer carrying frames
+        in both directions, matched by request id, redialled on demand after a loss). A receiver reads frames until
+        the sender closes, so either policy works against either peer; a frame whose header carries the keep-alive
+        bit tells the receiver it may send back on that connection, which is how a peer without a reachable address
+        (a proxy behind NAT that dialled in) is reached.
          TODO: Mechanism for polling communication with remote (where push is not possible)?
          TODO: Implement encryption.
         """
         self.chunk_size: int = chunk_size
         self.encrypt: bool = encrypt
+        self.persistent: bool = persistent
+        self.persistent_max_frame: int | None = persistent_max_frame
         self.inbound_params = inbound_params
         self.min_port: int = min_port
         self.max_port: int = max_port
@@ -111,6 +130,20 @@ class IPCConnector(metaclass=ABCMeta):
         for p in range(next_port, self.max_port + 1):
             if p not in used_ports:
                 yield p
+
+    def is_persistent(self, remote: ProtocolProxyPeer) -> bool:
+        """Whether new connections toward this peer are kept open (the peer's own policy, else this connector's)."""
+        return self.persistent if remote.persistent is None else remote.persistent
+
+    def _fail_pending(self, request_ids, error: Exception):
+        """Fail the awaited results of requests whose connection was lost; callers see ``error`` instead of waiting
+        out their timeout. Flavours implement ``_fail_result`` for their result type."""
+        for request_id in list(request_ids):
+            if (result := self.response_results.get(request_id)) is not None:
+                self._fail_result(result, error)
+
+    def _fail_result(self, result, error: Exception):
+        raise NotImplementedError
 
     @property
     def next_request_id(self):
