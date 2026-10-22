@@ -12,6 +12,8 @@ class ProtocolHeaders(metaclass=ABCMeta):
     FORMAT = 'Q32sH16s16s'
     HEADER_LENGTH = struct.calcsize(FORMAT)
     VERSION = 0                                     # 2 byte (16 bit) integer (H)
+    #: Largest request id the version's header field holds (16 bits before version 2, 32 bits from version 2).
+    REQUEST_ID_MAX = 0xFFFF
     #: Which remote (device, outstation, server...) a message concerns; versions before 2 carry none.
     remote_id: UUID | None = None
 
@@ -30,10 +32,16 @@ class ProtocolHeaders(metaclass=ABCMeta):
     def bitflag_is_set(bit_position, byte_value):
         return bool((byte_value & (1 << bit_position)) >> bit_position)
 
+    def _check_request_id(self):
+        if not 0 <= self.request_id <= self.REQUEST_ID_MAX:
+            raise ValueError(f'Request id {self.request_id} does not fit the version {self.VERSION} header'
+                             f' (maximum {self.REQUEST_ID_MAX}).')
+
     @abstractmethod
     def pack(self):
         # TODO: The sender_id is currently the proxy_id, which is a tuple. This should probably become a UUID?
         #  (Need to figure out how/where to map one to the other.)
+        self._check_request_id()
         return struct.pack(f'>H{ProtocolHeaders.FORMAT}', self.VERSION, self.data_length,
                            self.method_name.encode('utf8'), self.request_id, self.sender_id.bytes,
                            self.sender_token.bytes)
@@ -79,16 +87,21 @@ class HeadersV1(ProtocolHeaders):
 
 
 class HeadersV2(HeadersV1):
-    """Version 1 plus a 16-byte remote id (all zeros when absent).
+    """Version 1 with a 32-bit request id and a 16-byte remote id (all zeros when absent).
 
     A proxy process serves many remotes, so the sender id alone cannot say which remote a pushed message concerns.
     The remote id is the identifier the caller gave the proxy when it registered the remote; the receiving connector
-    dispatches on ``(method_name, remote_id)`` and falls back to the method-only callback. Version 2 is the default for
-    every message (``ProtocolProxyMessage.protocol_version``); receivers still accept version 1.
+    dispatches on ``(method_name, remote_id)`` and falls back to the method-only callback. The request id is widened
+    from 16 to 32 bits so that a persistent, multiplexed connection cannot wrap it within a session. Version 2 is the
+    default for every message (``ProtocolProxyMessage.protocol_version``); receivers still accept version 1.
+
+    Layout after the 2-byte version word: data_length Q, method_name 32s, request_id I, sender_id 16s,
+    sender_token 16s, bitflags H, remote_id 16s (94 bytes).
     """
-    FORMAT = HeadersV1.FORMAT + '16s'
+    FORMAT = 'Q32sI16s16sH16s'
     HEADER_LENGTH = struct.calcsize(FORMAT)
     VERSION = 2
+    REQUEST_ID_MAX = 0xFFFFFFFF
     NO_REMOTE = bytes(16)
 
     def __init__(self, data_length: int, method_name: str, request_id: int, sender_id, sender_token,
@@ -98,7 +111,11 @@ class HeadersV2(HeadersV1):
         self.remote_id: UUID | None = remote_id
 
     def pack(self):
-        return super(HeadersV2, self).pack() + struct.pack('>16s', self.remote_id.bytes if self.remote_id else self.NO_REMOTE)
+        self._check_request_id()
+        bitflags = (int(self.response_expected) << self.RESPONSE_EXPECTED_BIT)
+        return struct.pack(f'>H{self.FORMAT}', self.VERSION, self.data_length, self.method_name.encode('utf8'),
+                           self.request_id, self.sender_id.bytes, self.sender_token.bytes, bitflags,
+                           self.remote_id.bytes if self.remote_id else self.NO_REMOTE)
 
     @classmethod
     def unpack(cls, header_bytes):

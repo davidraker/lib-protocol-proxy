@@ -46,7 +46,7 @@ class AsyncioIPCConnector(IPCConnector):
             _log.error(f'{self.proxy_name}: send() requires a ProtocolProxyPeer, got {type(remote).__name__}: {remote}')
             return False
         if message.request_id is None:
-            message.request_id = self.next_request_id
+            message.request_id = self.request_id_for(message.protocol_version)
         if message.response_expected:
             result = self.loop.create_future()
             self.response_results[message.request_id] = result

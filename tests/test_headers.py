@@ -35,13 +35,32 @@ def test_v1_round_trip_has_no_remote():
 def test_v2_round_trip_with_and_without_remote():
     sender, token, remote = uuid4(), uuid4(), uuid4()
     packed = HeadersV2(5, 'RECEIVE_UNSOLICITED', 9, sender, token, False, remote).pack()
-    assert len(packed) == 2 + HeadersV2.HEADER_LENGTH == 2 + HeadersV1.HEADER_LENGTH + 16
+    assert len(packed) == 2 + HeadersV2.HEADER_LENGTH == 2 + HeadersV1.HEADER_LENGTH + 16 + 2   # remote id, wider request id
     assert packed[:2] == b'\x00\x02'
     headers = HeadersV2.unpack(packed[2:])
     assert headers.remote_id == remote and headers.method_name == 'RECEIVE_UNSOLICITED' and headers.response_expected is False
     assert 'remote_id' in repr(headers)
     bare = HeadersV2.unpack(HeadersV2(0, 'M', 1, sender, token).pack()[2:])
     assert bare.remote_id is None
+
+
+def test_v2_request_ids_are_32_bits_and_v1_refuses_them():
+    import pytest
+    sender, token = uuid4(), uuid4()
+    wide = 0xFFFFFFFE
+    headers = HeadersV2.unpack(HeadersV2(0, 'M', wide, sender, token).pack()[2:])
+    assert headers.request_id == wide
+    assert HeadersV2.HEADER_LENGTH == 94 and HeadersV1.HEADER_LENGTH == 76
+    with pytest.raises(ValueError, match='version 1'):
+        HeadersV1(0, 'M', 0x10000, sender, token).pack()
+
+
+def test_connectors_draw_request_ids_that_fit_the_header_version():
+    p = gevent_proxy()
+    assert 1 <= p.request_id_for(1) <= 0xFFFF
+    p._request_ids[2] = iter([0x10000, 0x10001])
+    assert p.request_id_for(2) == 0x10000 and p.next_request_id == 0x10001      # not folded to 16 bits
+    assert HeadersV2.REQUEST_ID_MAX == 0xFFFFFFFF and HeadersV1.REQUEST_ID_MAX == 0xFFFF
 
 
 def test_messages_default_to_version_2_and_may_opt_down():

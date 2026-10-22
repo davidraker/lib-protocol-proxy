@@ -79,7 +79,9 @@ class IPCConnector(metaclass=ABCMeta):
         self.remote_callbacks: dict[tuple[str, UUID], ProtocolProxyCallback] = {}
         self.peers: dict[UUID, ProtocolProxyPeer] = {}
         self.register_callback(self._handle_response, 'RESPONSE')
-        self._request_id = cycle(range(1, 65535))
+        # Request ids are drawn per header version: 16 bits for version 1 peers, 32 bits from version 2.
+        self._request_ids = {version: cycle(range(1, protocol.REQUEST_ID_MAX))
+                             for version, protocol in self.PROTOCOL_VERSION.items()}
 
     @abstractmethod
     def _get_ip_addresses(self, host_name: str) -> set[str]:
@@ -109,7 +111,15 @@ class IPCConnector(metaclass=ABCMeta):
 
     @property
     def next_request_id(self):
-        return next(self._request_id)
+        """The next request id for the default (version 2) header."""
+        return self.request_id_for(ProtocolProxyMessage.protocol_version)
+
+    def request_id_for(self, protocol_version: int) -> int:
+        """The next request id that fits the given header version."""
+        try:
+            return next(self._request_ids[protocol_version])
+        except KeyError:
+            raise NotImplementedError(f'Unknown proxy protocol version: {protocol_version}') from None
 
     def register_callback(self, cb_method, method_name, provides_response=False, timeout=30.0,
                           remote_id: UUID | None = None):

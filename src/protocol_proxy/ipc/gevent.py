@@ -112,7 +112,7 @@ class GeventIPCConnector(IPCConnector):
                          f" {getattr(remote, 'socket_params', remote)}: {e}")
             return False
         if message.request_id is None:
-            message.request_id = self.next_request_id
+            message.request_id = self.request_id_for(message.protocol_version)
         self.outbound_messages[outbound] = message  # TODO: Should there be a check for empty messages before this and next lines?
         self.outbounds.add(outbound)
         if message.response_expected:
