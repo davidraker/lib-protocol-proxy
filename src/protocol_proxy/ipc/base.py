@@ -1,5 +1,6 @@
 import json
 import logging
+import time
 
 from abc import abstractmethod, ABC, ABCMeta
 from collections.abc import Generator
@@ -62,9 +63,18 @@ class ProtocolProxyPeer(ABC):
     #: The open persistent connection to this peer, if any: one this side dialled, or one the peer dialled and this
     #: side adopted when a frame arrived on it with the keep-alive bit set.
     connection: Any = None
+    #: What the peer advertised in REGISTER_PEER (``ping``, ``log``, ``set_log_level``, ...).
+    features: tuple = ()
+    #: Liveness as the manager sees it: launching, registered, healthy, unhealthy (missed heartbeats), lost.
+    state: str = 'launching'
+    last_seen: float | None = None      # time.time() of the last frame or heartbeat reply from this peer
+    missed: int = 0                     # consecutive heartbeats without a reply
+    health: dict | None = None          # the peer's last PING reply (uptime, remotes, busy, last_activity)
 
     def mark_registered(self):
         """Called by the manager once this peer's address is known; a subclass may wake waiters here."""
+        self.state = 'registered'
+        self.last_seen = time.time()
 
 
 class IPCConnector(metaclass=ABCMeta):
@@ -99,6 +109,8 @@ class IPCConnector(metaclass=ABCMeta):
         self.proxy_name = proxy_name if proxy_name else str(self.proxy_id)
         self.token = token
 
+        self.started_at: float = time.time()
+        self.last_activity: float | None = None     # when the last frame was received
         self.callbacks: dict[str, ProtocolProxyCallback] = {}
         # Callbacks for one remote: (method_name, remote_id). Looked up first; self.callbacks is the fallback.
         self.remote_callbacks: dict[tuple[str, UUID], ProtocolProxyCallback] = {}
@@ -203,7 +215,11 @@ class IPCConnector(metaclass=ABCMeta):
         return self.callbacks.pop(method_name, None) is not None
 
     def find_callback(self, headers: ProtocolHeaders) -> ProtocolProxyCallback | None:
-        """The handler for a received message: the remote's own if the message names one it has, else the method's."""
+        """The handler for a received message: the remote's own if the message names one it has, else the method's.
+        Called for every frame received, so it also records the last activity on this connector and from the sender."""
+        self.last_activity = time.time()
+        if (peer := self.peers.get(getattr(headers, 'sender_id', None))) is not None:
+            peer.last_seen = self.last_activity
         remote_id = getattr(headers, 'remote_id', None)
         if remote_id is not None and (cb_info := self.remote_callbacks.get((headers.method_name, remote_id))):
             return cb_info

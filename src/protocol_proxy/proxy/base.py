@@ -3,6 +3,9 @@ import json
 import logging
 import os
 import sys
+import time
+
+from datetime import datetime, timezone
 
 from importlib import import_module
 from pkgutil import iter_modules
@@ -54,7 +57,27 @@ class ProtocolProxy(IPCConnector, metaclass=abc.ABCMeta):
         self.socket_logging: bool = socket_logging
         self.log_handler: SocketLogHandler | None = None
         self.register_callback(self.handle_set_log_level, 'SET_LOG_LEVEL', provides_response=True)
+        self.register_callback(self.handle_ping, 'PING', provides_response=True)
         self.apply_plugins()
+
+    # ---- liveness -------------------------------------------------------------------------------------------------
+    #: Advertised in REGISTER_PEER so the manager knows what this proxy answers.
+    FEATURES: ClassVar[tuple[str, ...]] = ('ping', 'log', 'set_log_level')
+
+    def health_report(self) -> dict:
+        """What a PING reply carries. ``remotes`` is protocol-specific: the base counts the remotes with their own
+        callbacks registered; a protocol may override to report what it actually serves, and set ``busy`` while a
+        long operation is in progress."""
+        last = self.last_activity
+        return {'uptime': round(time.time() - self.started_at, 3),
+                'remotes': len({remote_id for _, remote_id in self.remote_callbacks}),
+                'busy': False,
+                'last_activity': datetime.fromtimestamp(last, timezone.utc).isoformat() if last else None}
+
+    @callback
+    def handle_ping(self, headers: ProtocolHeaders, raw_message: bytes) -> bytes:
+        """The manager's heartbeat: reply with the health report."""
+        return json.dumps(self.health_report(), default=str).encode('utf8')
 
     # ---- logging over the socket ----------------------------------------------------------------------------------
     def on_registered(self):
@@ -159,7 +182,7 @@ class ProtocolProxy(IPCConnector, metaclass=abc.ABCMeta):
         message = ProtocolProxyMessage(
             method_name='REGISTER_PEER',
             payload= json.dumps({'address': local_address, 'port':local_port, 'proxy_id': self.proxy_id.hex,
-                                 'token': self.token.hex}).encode('utf8'),
+                                 'token': self.token.hex, 'features': list(self.FEATURES)}).encode('utf8'),
             response_expected=True
         )
         return message

@@ -20,6 +20,46 @@ _log = logging.getLogger(__name__)
 class AsyncioProtocolProxyManager(ProtocolProxyManager, AsyncioIPCConnector, ABC):
     def __init__(self, proxy_class: Type[ProtocolProxy], **kwargs):
         super().__init__(proxy_class=proxy_class, **kwargs)
+        self._heartbeat: asyncio.Task | None = None
+
+    # ---- heartbeat -----------------------------------------------------------------------------------------------
+    def start_heartbeat(self):
+        if self.heartbeat_interval and (self._heartbeat is None or self._heartbeat.done()):
+            self._heartbeat = self.loop.create_task(self._heartbeat_loop())
+
+    async def _heartbeat_loop(self):
+        while True:
+            await asyncio.sleep(self.heartbeat_interval)
+            for peer in self.peers_to_ping():
+                self.loop.create_task(self._ping(peer))
+
+    async def _ping(self, peer: AsyncioProtocolProxyPeer):
+        try:
+            result = await self.send(peer, self.ping_message())
+            if result is False:
+                raise ConnectionError('send refused')
+            reply = await asyncio.wait_for(result, self.heartbeat_timeout)
+        except asyncio.TimeoutError:
+            lost = self.heartbeat_missed(peer, f'no reply within {self.heartbeat_timeout} s')
+        except Exception as e:
+            lost = self.heartbeat_missed(peer, str(e))
+        else:
+            self.heartbeat_answered(peer, reply)
+            return
+        if lost and self.peers.get(peer.proxy_id) is peer:
+            self._lose_peer(peer, f'missed {peer.missed} heartbeats')
+
+    def _lose_peer(self, peer: ProtocolProxyPeer, reason: str):
+        """Forget a peer, stop its process if it still runs, and tell the peer-lost listeners."""
+        if self.peers.get(peer.proxy_id) is peer:
+            del self.peers[peer.proxy_id]
+        process = getattr(peer, 'process', None)
+        if process is not None and process.returncode is None:
+            try:
+                process.terminate()
+            except ProcessLookupError:
+                pass
+        self._notify_peer_lost(peer, reason)
 
     async def wait_peer_registered(self, peer, timeout, func=None, *args, **kwargs):
         """ Waits for a peer to be ready, optionally calling a function when it is.
@@ -59,6 +99,7 @@ class AsyncioProtocolProxyManager(ProtocolProxyManager, AsyncioIPCConnector, ABC
                                                             name=proxy_name, persistent=self.peer_policy(kwargs))
             self._setup_exit(proxy_process)
             atexit.register(self.finalize_process, proxy_process)
+            self.start_heartbeat()
         return self.peers[proxy_id]
 
     async def log_subprocess_output(self, stream: StreamReader, logger: logging.Logger, stream_name: str = 'stderr',

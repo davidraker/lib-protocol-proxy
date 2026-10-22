@@ -3,7 +3,7 @@ import logging
 import os
 
 from abc import ABC
-from gevent import spawn
+from gevent import sleep, spawn, Greenlet
 from gevent.subprocess import Popen, PIPE
 from gevent.timeout import Timeout
 from uuid import uuid4
@@ -20,6 +20,35 @@ _log = logging.getLogger(__name__)
 class GeventProtocolProxyManager(ProtocolProxyManager, GeventIPCConnector, ABC):
     def __init__(self, proxy_class: Type[ProtocolProxy], **kwargs):
         super().__init__(proxy_class=proxy_class, **kwargs)
+        self._heartbeat: Greenlet | None = None
+
+    # ---- heartbeat -----------------------------------------------------------------------------------------------
+    def start_heartbeat(self):
+        """Start pinging registered peers on the heartbeat interval (idempotent; a no-op when the interval is 0)."""
+        if self.heartbeat_interval and (self._heartbeat is None or self._heartbeat.dead):
+            self._heartbeat = spawn(self._heartbeat_loop)
+
+    def _heartbeat_loop(self):
+        while True:
+            sleep(self.heartbeat_interval)
+            for peer in self.peers_to_ping():
+                spawn(self._ping, peer)
+
+    def _ping(self, peer: GeventProtocolProxyPeer):
+        try:
+            result = self.send(peer, self.ping_message())
+            if result is False:
+                raise ConnectionError('send refused')
+            reply = result.get(timeout=self.heartbeat_timeout)
+        except Timeout:
+            lost = self.heartbeat_missed(peer, f'no reply within {self.heartbeat_timeout} s')
+        except Exception as e:
+            lost = self.heartbeat_missed(peer, str(e))
+        else:
+            self.heartbeat_answered(peer, reply)
+            return
+        if lost and self.peers.get(peer.proxy_id) is peer:
+            self._lose_peer(peer, f'missed {peer.missed} heartbeats')
 
     def wait_peer_registered(self, peer, timeout, func=None, *args, **kwargs):
         """ Waits for a peer to be ready, optionally calling a function when it is.
@@ -88,6 +117,7 @@ class GeventProtocolProxyManager(ProtocolProxyManager, GeventIPCConnector, ABC):
             proxy_process.stdin = open(os.devnull)
             atexit.register(self._cleanup_proxy_process, proxy_process)
             spawn(self._watch_proxy_process, proxy_id, peer)
+            self.start_heartbeat()
             # Do NOT send to the proxy until it has registered and socket_params is set!
             _log.info(f"PPM: Proxy {proxy_id} created, waiting for registration before sending.")
         #_log.debug(f'@@@@@@@ GET_PROXY WILL RETURN PEER: {self.peers[proxy_id]} @@@@@@@')

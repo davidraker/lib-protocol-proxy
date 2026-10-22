@@ -157,7 +157,7 @@ def test_real_proxy_logs_by_stderr_then_socket_then_stderr_at_exit(proxy_class_n
     tests_dir = str(Path(__file__).resolve().parent)         # the child imports dummy_proxies from here
     monkeypatch.setenv('PYTHONPATH', os.pathsep.join(filter(None, [tests_dir, os.environ.get('PYTHONPATH')])))
     import dummy_proxies as dummies
-    manager = GeventProtocolProxyManager(proxy_class=getattr(dummies, proxy_class_name))
+    manager = GeventProtocolProxyManager(proxy_class=getattr(dummies, proxy_class_name), heartbeat_interval=0.3)
     manager.start()
     loop = gevent.spawn(manager.select_loop)
     peer = None
@@ -176,6 +176,10 @@ def test_real_proxy_logs_by_stderr_then_socket_then_stderr_at_exit(proxy_class_n
         # Everything up to registration came by the pipe; the switch itself is the first record over the socket.
         assert any(r.channel == 'stderr' and 'Registered with manager' in r.getMessage() for r in proxies_log)
         assert any('logging over the IPC socket' in r.getMessage() for r in by_socket())
+        _wait(lambda: peer.state == 'healthy', what='a heartbeat reply from the real proxy')
+        health = manager.health()["('dummy', 'x')"]
+        assert health['pid'] == peer.process.pid and health['report']['uptime'] > 0
+        assert health['features'] == ['ping', 'log', 'set_log_level'] and peer.features == tuple(health['features'])
         reply = manager.set_proxy_log_level(peer, 'DEBUG').get(timeout=5)
         assert json.loads(reply) == {'level': 'DEBUG'}
         _wait(lambda: any(r.levelno == logging.DEBUG and r.getMessage().startswith('debug tick') for r in by_socket()),
@@ -187,5 +191,7 @@ def test_real_proxy_logs_by_stderr_then_socket_then_stderr_at_exit(proxy_class_n
     finally:
         if peer is not None and peer.process is not None and peer.process.poll() is None:
             peer.process.kill()
+        if manager._heartbeat is not None:
+            manager._heartbeat.kill()
         manager.stop()
         gevent.joinall([loop], timeout=2)

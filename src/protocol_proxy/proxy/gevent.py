@@ -104,6 +104,9 @@ class GeventProtocolProxy(GeventIPCConnector, ProtocolProxy, ABC):
 
     def stop(self):
         self.stop_socket_logging()
+        if self._signal_watcher is not None:
+            self._signal_watcher.cancel()
+            self._signal_watcher = None
         super(GeventProtocolProxy, self).stop()
 
     def _watch_manager(self):
@@ -137,7 +140,4 @@ class GeventProtocolProxy(GeventIPCConnector, ProtocolProxy, ABC):
             joinall(self.start(), raise_error=True)
         finally:
             self.stop()
-            if self._signal_watcher is not None:
-                self._signal_watcher.cancel()
-                self._signal_watcher = None
         return 0 if self.registered else 1

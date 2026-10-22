@@ -26,6 +26,7 @@ class GeventProtocolProxyPeer(ProtocolProxyPeer):
     registered: Event = field(default_factory=Event)    # set when the manager has recorded this peer's address
 
     def mark_registered(self):
+        super().mark_registered()
         self.registered.set()
 
     ready: RLock = field(default_factory=RLock)     # one lock per peer; a shared default would serialize every peer

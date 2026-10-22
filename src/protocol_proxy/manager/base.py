@@ -2,6 +2,7 @@ import json
 import logging
 import os
 import sys
+import time
 
 from abc import abstractmethod, ABC
 from importlib import import_module
@@ -23,10 +24,17 @@ Self = TypeVar("Self", bound="ProtocolProxyManager")  # TODO: Deprecated by typi
 class ProtocolProxyManager(IPCConnector, ABC):
     managers = WeakValueDictionary()
 
-    def __init__(self, *, proxy_class: Type[ProtocolProxy], proxy_name: str = 'Manager', **kwargs):
+    def __init__(self, *, proxy_class: Type[ProtocolProxy], proxy_name: str = 'Manager',
+                 heartbeat_interval: float = 10.0, heartbeat_timeout: float = 5.0, heartbeat_misses: int = 3,
+                 **kwargs):
         self.unique_ids = {}
         super().__init__(proxy_id=self.get_proxy_id('proxy_manager'), proxy_name=proxy_name, token=uuid4(), **kwargs)
         self.proxy_class = proxy_class
+        # Heartbeat: PING every registered peer each interval; a peer that misses ``heartbeat_misses`` replies in a
+        # row is lost (same path as a process exit). 0 disables. The flavour's loop starts with the first get_proxy.
+        self.heartbeat_interval = heartbeat_interval
+        self.heartbeat_timeout = heartbeat_timeout
+        self.heartbeat_misses = heartbeat_misses
         # Weak references to ``callback(peer, reason)`` callables, told when a launched proxy is lost (see on_peer_lost).
         self.peer_lost_callbacks: list = []
         self.register_callback(self.handle_peer_registration, 'REGISTER_PEER', provides_response=True)
@@ -124,12 +132,61 @@ class ProtocolProxyManager(IPCConnector, ABC):
             return json.dumps(False).encode('utf8')
         if  (address := message.get('address')) and (port := message.get('port')):
             proxy.socket_params = SocketParams(address=address, port=port)
+            proxy.features = tuple(message.get('features') or ())
             proxy.mark_registered()
             _log.info(f'PPM: Successfully registered peer: {proxy.proxy_id} @ {proxy.socket_params}')
             return json.dumps(True).encode('utf8')
         else:  # TODO: Is there any reasonable situation where this runs and returns false?
             _log.error(f'PPM: Failed to register peer: {proxy.proxy_id} with message: {message}.')
             return json.dumps(False).encode('utf8')
+
+    # ---- heartbeat and health ------------------------------------------------------------------------------------
+    def ping_message(self) -> ProtocolProxyMessage:
+        return ProtocolProxyMessage(method_name='PING', payload=b'', response_expected=True)
+
+    def peers_to_ping(self) -> list[ProtocolProxyPeer]:
+        """Registered peers launched by this manager (those with a process); a peer still registering is skipped."""
+        return [peer for peer in list(self.peers.values())
+                if peer.socket_params is not None and getattr(peer, 'process', None) is not None]
+
+    def heartbeat_answered(self, peer: ProtocolProxyPeer, raw_reply) -> None:
+        """A PING reply (any reply: an old proxy answers with an unknown-method error, which still proves it alive)."""
+        peer.last_seen = time.time()
+        peer.missed = 0
+        peer.state = 'healthy'
+        try:
+            report = json.loads(raw_reply.decode('utf8') if isinstance(raw_reply, (bytes, bytearray)) else raw_reply)
+            peer.health = report if isinstance(report, dict) and report.get('status') != 'error' else peer.health
+        except (ValueError, TypeError, AttributeError):
+            pass
+
+    def heartbeat_missed(self, peer: ProtocolProxyPeer, why: str) -> bool:
+        """A PING went unanswered. Returns True when the peer has now missed enough to be considered lost; the
+        flavour then runs its peer-lost path."""
+        if self.peers.get(peer.proxy_id) is not peer:
+            return False                    # already replaced or removed; nothing more to do
+        peer.missed += 1
+        peer.state = 'unhealthy'
+        lost = peer.missed >= self.heartbeat_misses
+        _log.log(logging.WARNING if lost else logging.INFO,
+                 f'PPM: {peer.name or peer.proxy_id} missed heartbeat {peer.missed} of {self.heartbeat_misses} ({why}).')
+        if lost:
+            peer.state = 'lost'
+        return lost
+
+    def health(self) -> dict[str, dict]:
+        """Liveness of every peer this manager knows, keyed by proxy name (id when unnamed): the state machine
+        (launching, registered, healthy, unhealthy, lost), when it was last heard from, consecutive misses, the
+        features it advertised, its pid, and its last PING report."""
+        report = {}
+        for peer in list(self.peers.values()):
+            process = getattr(peer, 'process', None)
+            report[peer.name or str(peer.proxy_id)] = {
+                'proxy_id': str(peer.proxy_id), 'state': peer.state, 'last_seen': peer.last_seen,
+                'missed': peer.missed, 'features': list(peer.features), 'persistent': self.is_persistent(peer),
+                'connected': peer.connection is not None and peer.connection.alive,
+                'pid': getattr(process, 'pid', None), 'report': peer.health}
+        return report
 
     def handle_log(self, headers: ProtocolHeaders, raw_message: bytes):
         """A LOG batch from a registered proxy: its records are handled through the proxy's logger exactly like
