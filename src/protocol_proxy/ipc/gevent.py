@@ -204,6 +204,8 @@ class GeventIPCConnector(IPCConnector):
                 else:
                     _log.warning(f'{self.proxy_name}: {address} closed the connection without answering'
                                  f' {message.method_name} (request_id: {message.request_id}).')
+                    self._fail_pending([message.request_id], ConnectionError(
+                        f'{address} closed the connection without answering {message.method_name}'))
         except (OSError, Exception) as e:
             if not self._stop:
                 _log.warning(f'{self.proxy_name}: Unable to send {message.method_name}'
@@ -300,9 +302,13 @@ class GeventIPCConnector(IPCConnector):
     def _dispatch(self, conn: GeventConnection, headers: ProtocolHeaders, payload: bytes):
         """Run the handler for a frame and, if the handler provides a response, write it back on the same connection.
         A handler that raises or exceeds its timeout answers with the same JSON error the asyncio connector sends."""
-        if not (cb_info := self.find_callback(headers)):
+        cb_info = self.find_callback(headers)
+        if cb_info is None:
             _log.warning(f'{self.proxy_name}: Received unknown method name: {headers.method_name}'
                          f' from {self._peer_name(conn.sock)} with request ID: {headers.request_id}')
+        if (owed := self.unanswerable(headers, cb_info)) is not None:
+            self._reply(conn, headers, owed)      # the caller asked for a reply nobody will give: fail it now
+        if cb_info is None:
             return
         try:
             result = with_timeout(cb_info.timeout, cb_info.method, self, headers, payload, timeout_value=_TIMED_OUT)
@@ -317,13 +323,16 @@ class GeventIPCConnector(IPCConnector):
             _log.warning(f'{self.proxy_name}: Callback {headers.method_name} raised: {e!r}')
             result = json.dumps({'status': 'error', 'error': repr(e), 'method': headers.method_name}).encode('utf8')
         if cb_info.provides_response:
-            response = ProtocolProxyMessage(method_name='RESPONSE', payload=result, request_id=headers.request_id)
-            try:
-                conn.write(self._frame(response, keep_alive=conn.persistent))
-            except (OSError, Exception) as e:
-                if not self._stop:
-                    _log.warning(f'{self.proxy_name}: Unable to answer {headers.method_name}'
-                                 f' (request_id: {headers.request_id}) on {conn}: {e}')
+            self._reply(conn, headers, result)
+
+    def _reply(self, conn: GeventConnection, headers: ProtocolHeaders, payload):
+        response = ProtocolProxyMessage(method_name='RESPONSE', payload=payload, request_id=headers.request_id)
+        try:
+            conn.write(self._frame(response, keep_alive=conn.persistent))
+        except (OSError, Exception) as e:
+            if not self._stop:
+                _log.warning(f'{self.proxy_name}: Unable to answer {headers.method_name}'
+                             f' (request_id: {headers.request_id}) on {conn}: {e}')
 
     def _adopt(self, conn: GeventConnection, headers: ProtocolHeaders):
         """A frame with the keep-alive bit arrived on an accepted connection: the sender keeps it open, so if the

@@ -1,5 +1,6 @@
 """Loopback tests for the asyncio IPC connector, and one gevent-to-asyncio pair (a manager and an asyncio proxy)."""
 import asyncio
+import json
 import threading
 import time
 from uuid import uuid4
@@ -118,6 +119,38 @@ def test_large_frames_take_their_own_connection():
         assert peer_b.connection is link and link.alive
         await asyncio.sleep(0.05)
         assert len(a.connections) == 1
+        await stop_all(a, b)
+    asyncio.run(main())
+
+
+@pytest.mark.parametrize('persistent', [False, True])
+def test_requests_nobody_can_answer_fail_at_once(persistent):
+    async def main():
+        a, b, peer_a, peer_b = await make_pair()
+        peer_b.persistent = persistent
+        b.register_callback(lambda ipc, headers, raw: None, 'FIRE_AND_FORGET')
+        loop = asyncio.get_running_loop()
+        started = loop.time()
+        error = json.loads(await request(a, peer_b, 'NOPE'))
+        assert error['status'] == 'error' and 'Unknown method NOPE' in error['error']
+        error = json.loads(await request(a, peer_b, 'FIRE_AND_FORGET'))
+        assert 'provides no response' in error['error']
+        assert loop.time() - started < 1.0
+        await stop_all(a, b)
+    asyncio.run(main())
+
+
+def test_peer_closing_without_an_answer_fails_the_result():
+    async def main():
+        a, b, peer_a, peer_b = await make_pair()
+
+        async def rude(ipc, headers, raw):
+            for protocol in list(b.connections):
+                protocol.close()                                    # EOF instead of a reply
+        b.register_callback(rude, 'RUDE', provides_response=True)
+        result = await a.send(peer_b, ProtocolProxyMessage(method_name='RUDE', payload=b'', response_expected=True))
+        with pytest.raises(ConnectionError):
+            await asyncio.wait_for(result, 2)
         await stop_all(a, b)
     asyncio.run(main())
 

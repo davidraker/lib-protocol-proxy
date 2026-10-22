@@ -1,3 +1,4 @@
+import json
 import logging
 
 from abc import abstractmethod, ABC, ABCMeta
@@ -146,6 +147,23 @@ class IPCConnector(metaclass=ABCMeta):
 
     def _fail_result(self, result, error: Exception):
         raise NotImplementedError
+
+    @staticmethod
+    def error_payload(method_name: str, error: str) -> bytes:
+        """The JSON error reply both connectors send when a request cannot be answered properly."""
+        return json.dumps({'status': 'error', 'error': error, 'method': method_name}).encode('utf8')
+
+    def unanswerable(self, headers: ProtocolHeaders, cb_info: ProtocolProxyCallback | None) -> bytes | None:
+        """When a request expects a response that no handler will give (unknown method, or a handler registered
+        without one), the error reply to send instead, so the caller fails at once rather than waiting out its
+        timeout. None when nothing is owed."""
+        if not getattr(headers, 'response_expected', False):
+            return None
+        if cb_info is None:
+            return self.error_payload(headers.method_name, f'Unknown method {headers.method_name}')
+        if not cb_info.provides_response:
+            return self.error_payload(headers.method_name, f'Method {headers.method_name} provides no response')
+        return None
 
     @property
     def next_request_id(self):

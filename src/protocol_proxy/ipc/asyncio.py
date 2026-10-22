@@ -293,14 +293,15 @@ class IPCProtocol(BufferedProtocol):
                     self.connector._adopt(self, headers)
                 if headers.method_name == 'RESPONSE':
                     self.pending.discard(headers.request_id)
-                if cb_info := self.connector.find_callback(headers):
-                    self.loop.create_task(self._run_callback(cb_info, headers, data))
-                    if not cb_info.provides_response and not self.persistent:
-                        self.transport.close()
-                else:
-                    if not self.persistent:
-                        self.transport.close()
+                cb_info = self.connector.find_callback(headers)
+                if cb_info is None:
                     _log.warning(f'{self.connector.proxy_name} -- No callback found for method: {headers.method_name}.')
+                if (owed := self.connector.unanswerable(headers, cb_info)) is not None:
+                    self._reply(headers, owed)        # the caller asked for a reply nobody will give: fail it now
+                if cb_info is not None:
+                    self.loop.create_task(self._run_callback(cb_info, headers, data))
+                if (cb_info is None or not cb_info.provides_response) and not self.persistent:
+                    self.transport.close()
         except Exception as e:
             _log.warning(f'{self.connector.proxy_name} -- Exception in buffer_updated: {e!r}')
 
@@ -332,16 +333,17 @@ class IPCProtocol(BufferedProtocol):
             _log.warning(f'{self.connector.proxy_name} -- Callback {headers.method_name} raised: {e!r}')
             result = json.dumps({'status': 'error', 'error': repr(e), 'method': headers.method_name}).encode('utf8')
         if callback_info.provides_response:
-            if result is None:
-                result = b''
-            message = ProtocolProxyMessage(method_name='RESPONSE', payload=result, request_id=headers.request_id)
-            if self.transport is None or self.transport.is_closing():
-                _log.warning(f'{self.connector.proxy_name} -- Connection gone before answering {headers.method_name}'
-                             f' (request_id: {headers.request_id}).')
-                return
-            self.transport.write(self._message_to_bytes(message, keep_alive=self.persistent))
+            self._reply(headers, b'' if result is None else result)
             if not self.persistent:
                 self.transport.close()
+
+    def _reply(self, headers, payload: bytes):
+        message = ProtocolProxyMessage(method_name='RESPONSE', payload=payload, request_id=headers.request_id)
+        if self.transport is None or self.transport.is_closing():
+            _log.warning(f'{self.connector.proxy_name} -- Connection gone before answering {headers.method_name}'
+                         f' (request_id: {headers.request_id}).')
+            return
+        self.transport.write(self._message_to_bytes(message, keep_alive=self.persistent))
 
     def connection_made(self, transport: Transport):
         #_log.debug(f"[IPCProtocol] connection_made: transport={transport}")
@@ -355,6 +357,8 @@ class IPCProtocol(BufferedProtocol):
                 transport.write(self._message_to_bytes(self.outgoing_message))
                 if not self.outgoing_message.response_expected:
                     transport.close()
+                else:
+                    self.pending.add(self.outgoing_message.request_id)    # failed if the peer closes without answering
         except Exception as e:
             _log.warning(f'{self.connector.proxy_name} -- Exception in connection_made: {e}')
 

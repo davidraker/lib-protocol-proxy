@@ -86,12 +86,34 @@ def test_handler_errors_and_timeouts_answer_with_a_json_error(pair):
     assert error['status'] == 'error' and 'timed out' in error['error'] and time.monotonic() - started < 0.9
 
 
-def test_unknown_method_closes_without_a_reply(pair):
+@pytest.mark.parametrize('persistent', [False, True])
+def test_requests_nobody_can_answer_fail_at_once(pair, persistent):
+    """An unknown method, or a handler registered without a response, answers with a JSON error instead of leaving
+    the caller to wait out its timeout; the per-message connection is closed as before."""
     a, b, peer_b = pair
-    result = a.send(peer_b, ProtocolProxyMessage(method_name='NOPE', payload=b'', response_expected=True))
-    assert result.wait(0.3) is None and not result.ready()
+    peer_b.persistent = persistent
+    b.register_callback(lambda ipc, headers, raw: None, 'FIRE_AND_FORGET')
+    started = time.monotonic()
+    error = json.loads(request(a, peer_b, 'NOPE'))
+    assert error['status'] == 'error' and 'Unknown method NOPE' in error['error'] and error['method'] == 'NOPE'
+    error = json.loads(request(a, peer_b, 'FIRE_AND_FORGET'))
+    assert 'provides no response' in error['error'] and error['method'] == 'FIRE_AND_FORGET'
+    assert time.monotonic() - started < 1.0
+    assert a.send(peer_b, ProtocolProxyMessage(method_name='FIRE_AND_FORGET', payload=b'')) is True   # no reply owed
     sleep(0.05)
-    assert not b.connections
+    assert len(b.connections) == (1 if persistent else 0)
+
+
+def test_peer_closing_without_an_answer_fails_the_result(pair):
+    a, b, peer_b = pair
+
+    class Rude(GeventIPCConnector):
+        def _dispatch(self, conn, headers, payload):
+            conn.close()                                            # an old or broken peer: no reply, just EOF
+    b.__class__ = Rude
+    result = a.send(peer_b, ProtocolProxyMessage(method_name='ECHO', payload=b'', response_expected=True))
+    with pytest.raises(ConnectionError):
+        result.get(timeout=2)
 
 
 def test_unauthenticated_sender_gets_an_empty_reply(pair):
