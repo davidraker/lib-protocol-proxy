@@ -1,9 +1,12 @@
 import asyncio
 import json
+import os
+import signal
 from types import SimpleNamespace
 from unittest import mock
 from uuid import uuid4
 
+import gevent
 from gevent.event import AsyncResult
 
 from protocol_proxy.ipc import callback, async_callback, ProtocolProxyPeer, SocketParams
@@ -170,4 +173,36 @@ def test_asyncio_start_returns_when_the_manager_disappears():
              mock.patch.object(p, 'manager_alive', side_effect=[True, False]):
             await asyncio.wait_for(p.start(), 2)        # serve_forever ends instead of raising CancelledError
         assert p._manager_lost and not p.inbound_server.is_serving()
+    asyncio.run(main())
+
+
+def test_gevent_sigterm_stops_the_proxy_and_run_returns_zero():
+    """The manager stops a proxy with SIGTERM; the proxy stops its loops and exits normally instead of dying."""
+    p = gevent_proxy()
+    p.inbound_params = SocketParams('127.0.0.1', 0)
+
+    def fake_registration(remote):
+        p.registered = True
+        return True
+    with mock.patch.object(p, 'send_registration', fake_registration):
+        runner = gevent.spawn(p.run)
+        gevent.sleep(0.1)
+        assert not runner.ready() and p._signal_watcher is not None
+        os.kill(os.getpid(), signal.SIGTERM)
+        assert runner.get(timeout=3) == 0
+    assert p._stop and p._signal_watcher is None and p.inbound_server_socket is None
+
+
+def test_asyncio_sigterm_stops_the_proxy_gracefully():
+    async def main():
+        p = AsyncioDummy(proxy_id=uuid4(), token=uuid4(), manager_address='127.0.0.1', manager_port=1,
+                         manager_id=uuid4(), manager_token=uuid4(), registration_retry_delay=0,
+                         registration_timeout=0.05, inbound_params=SocketParams('127.0.0.1', 0))
+        with mock.patch.object(p, 'send_registration', mock.AsyncMock(return_value=True)):
+            serving = asyncio.ensure_future(p.start())
+            await asyncio.sleep(0.1)
+            assert not serving.done() and p.inbound_server is not None
+            os.kill(os.getpid(), signal.SIGTERM)
+            await asyncio.wait_for(serving, 2)          # returns instead of raising CancelledError
+        assert p._stopping and not p.inbound_server.is_serving()
     asyncio.run(main())

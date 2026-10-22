@@ -3,7 +3,7 @@ import logging
 import os
 
 from abc import ABC
-from gevent import sleep, spawn, with_timeout
+from gevent import spawn
 from gevent.subprocess import Popen, PIPE
 from gevent.timeout import Timeout
 from uuid import uuid4
@@ -25,17 +25,12 @@ class GeventProtocolProxyManager(ProtocolProxyManager, GeventIPCConnector, ABC):
         """ Waits for a peer to be ready, optionally calling a function when it is.
             If the peer does not register within the timeout, it is removed and a warning is logged.
         """
-        def wait_for_peer_registration():
-            while peer.socket_params is None:
-                sleep(0.1)
-
-        try:
-            with peer.ready:
-                with_timeout(timeout, wait_for_peer_registration)
-        except Timeout:
-            _log.warning(f"Peer {peer.proxy_id} did not register within {timeout} seconds. Removing peer.")
-            self._lose_peer(peer, f'did not register within {timeout} seconds')
-            return
+        with peer.ready:
+            # Woken by handle_peer_registration (mark_registered); a peer whose address was set directly is ready now.
+            if peer.socket_params is None and not peer.registered.wait(timeout):
+                _log.warning(f"Peer {peer.proxy_id} did not register within {timeout} seconds. Removing peer.")
+                self._lose_peer(peer, f'did not register within {timeout} seconds')
+                return
         if func:
             try:
                 func(*args, **kwargs)

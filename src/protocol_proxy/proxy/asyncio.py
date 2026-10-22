@@ -1,6 +1,7 @@
 import asyncio
 import json
 import logging
+import signal
 
 from abc import ABC
 from typing import cast
@@ -25,6 +26,7 @@ class AsyncioProtocolProxy(AsyncioIPCConnector, ProtocolProxy, ABC):
         self.registration_attempts = registration_attempts
         self.registration_timeout = registration_timeout
         self.registered = False
+        self._stopping = False
 
     def get_local_socket_params(self) -> SocketParams:
         if self.inbound_server is None:
@@ -69,20 +71,37 @@ class AsyncioProtocolProxy(AsyncioIPCConnector, ProtocolProxy, ABC):
             await result
 
     async def stop(self):
+        """Stop serving. A protocol overrides this to close its sessions and flush state first, then calls super."""
+        self._stopping = True
         if self.inbound_server is not None:
             await super(AsyncioProtocolProxy, self).stop()
 
+    def _on_terminate_signal(self, signum: int):
+        """SIGTERM is how the manager stops a proxy: stop gracefully so protocols get to flush their state."""
+        if self._stopping:
+            return
+        _log.info(f'{self.proxy_name}: received {signal.Signals(signum).name}; stopping.')
+        self.loop.create_task(self.stop())
+
     async def start(self):
-        """Create the inbound server, register with the manager, then serve until stopped (or orphaned)."""
+        """Create the inbound server, register with the manager, then serve until stopped, terminated or orphaned."""
         await super(AsyncioProtocolProxy, self).start()
         if not await self.send_registration(cast(AsyncioProtocolProxyPeer, self.peers[self.manager])):
             raise RuntimeError(f'{self.proxy_name}: registration with the Proxy Manager failed.')
         watchdog = asyncio.ensure_future(self._watch_manager())
         try:
+            self.loop.add_signal_handler(signal.SIGTERM, self._on_terminate_signal, signal.SIGTERM)
+        except (RuntimeError, ValueError, NotImplementedError) as e:     # not the main thread, or no loop support
+            _log.debug(f'{self.proxy_name}: no SIGTERM handler installed: {e}')
+        try:
             async with self.inbound_server:
                 await self.inbound_server.serve_forever()
         except asyncio.CancelledError:
-            if not self._manager_lost:      # closing the server from on_manager_lost cancels serve_forever
+            if not (self._manager_lost or self._stopping):      # closing the server from stop() cancels serve_forever
                 raise
         finally:
             watchdog.cancel()
+            try:
+                self.loop.remove_signal_handler(signal.SIGTERM)
+            except (RuntimeError, ValueError, NotImplementedError):
+                pass

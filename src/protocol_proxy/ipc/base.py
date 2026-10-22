@@ -54,6 +54,9 @@ class ProtocolProxyPeer(ABC):
     token: UUID
     socket_params: SocketParams = None
 
+    def mark_registered(self):
+        """Called by the manager once this peer's address is known; a subclass may wake waiters here."""
+
 
 class IPCConnector(metaclass=ABCMeta):
     PROTOCOL_VERSION = {1: HeadersV1, 2: HeadersV2}

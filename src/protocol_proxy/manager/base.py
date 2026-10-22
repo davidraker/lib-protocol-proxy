@@ -118,6 +118,7 @@ class ProtocolProxyManager(IPCConnector, ABC):
             return json.dumps(False).encode('utf8')
         if  (address := message.get('address')) and (port := message.get('port')):
             proxy.socket_params = SocketParams(address=address, port=port)
+            proxy.mark_registered()
             _log.info(f'PPM: Successfully registered peer: {proxy.proxy_id} @ {proxy.socket_params}')
             return json.dumps(True).encode('utf8')
         else:  # TODO: Is there any reasonable situation where this runs and returns false?

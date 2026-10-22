@@ -1,5 +1,8 @@
 import io
+import json
+import time
 
+from types import SimpleNamespace
 from unittest import mock
 from uuid import uuid4
 
@@ -154,3 +157,22 @@ def test_concurrent_get_proxy_calls_launch_one_process():
         peers = [g.get() for g in gevent.joinall([gevent.spawn(manager.get_proxy, ('dummy', 'x')) for _ in range(3)])]
     assert peers[0] is peers[1] is peers[2] and peers[0].process is not None
     assert len(manager.peers) == 1 and FakeProcess._pids.__next__() - peers[0].process.pid == 1       # one launch
+
+
+def test_registration_wakes_the_waiter_at_once():
+    """wait_peer_registered is woken by handle_peer_registration rather than polling for the address."""
+    manager = _manager()
+    ran = []
+    with mock.patch('protocol_proxy.manager.gevent.Popen', FakeProcess):
+        peer = manager.get_proxy(('dummy', 'x'))
+
+        def register():
+            gevent.sleep(0.05)
+            headers = SimpleNamespace(sender_id=peer.proxy_id, sender_token=peer.token, request_id=1)
+            manager.handle_peer_registration(manager, headers, json.dumps({'address': '127.0.0.1', 'port': 5}).encode())
+        gevent.spawn(register)
+        started = time.monotonic()
+        manager.wait_peer_registered(peer, 5, lambda: ran.append(1))
+        elapsed = time.monotonic() - started
+    assert ran == [1] and peer.socket_params == SocketParams('127.0.0.1', 5) and peer.registered.is_set()
+    assert 0.04 < elapsed < 0.5, elapsed

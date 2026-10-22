@@ -1,8 +1,9 @@
 import json
 import logging
+import signal
 
 from abc import ABC
-from gevent import joinall, sleep, spawn, Greenlet
+from gevent import joinall, signal_handler, sleep, spawn, Greenlet
 from gevent.event import AsyncResult
 from gevent.timeout import Timeout
 from typing import cast
@@ -35,6 +36,7 @@ class GeventProtocolProxy(GeventIPCConnector, ProtocolProxy, ABC):
         self.registration_timeout = registration_timeout
         self.registered = False
         self._greenlets: list[Greenlet] = []
+        self._signal_watcher = None
 
     def get_local_socket_params(self) -> SocketParams:
         if self.inbound_server_socket is None:
@@ -80,9 +82,17 @@ class GeventProtocolProxy(GeventIPCConnector, ProtocolProxy, ABC):
             self._manager_lost = True
             self.on_manager_lost()
 
+    def _on_terminate_signal(self):
+        """SIGTERM is how the manager stops a proxy: stop gracefully so protocols get to flush their state."""
+        if not self._stop:
+            _log.info(f'{self.proxy_name}: received SIGTERM; stopping.')
+            self.stop()
+
     def start(self, *_, **__) -> list[Greenlet]:
-        """Create the inbound socket, then start the select loop, registration, main loop and manager watchdog."""
+        """Create the inbound socket, then start the accept loop, registration, main loop and manager watchdog."""
         super(GeventProtocolProxy, self).start()
+        if self._signal_watcher is None:
+            self._signal_watcher = signal_handler(signal.SIGTERM, self._on_terminate_signal)
         self._greenlets = [spawn(self.select_loop),
                            spawn(self.send_registration, cast(GeventProtocolProxyPeer, self.peers[self.manager])),
                            spawn(self.main_loop),
@@ -95,4 +105,7 @@ class GeventProtocolProxy(GeventIPCConnector, ProtocolProxy, ABC):
             joinall(self.start(), raise_error=True)
         finally:
             self.stop()
+            if self._signal_watcher is not None:
+                self._signal_watcher.cancel()
+                self._signal_watcher = None
         return 0 if self.registered else 1
