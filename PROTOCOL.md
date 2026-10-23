@@ -17,6 +17,9 @@ python -m protocol_proxy.proxy [--gevent] <module>:<ProxyClass> --proxy-id <hex>
     [--compress-threshold <int>] [--log-level <LEVEL>] [--<protocol option> <value> ...]
 ```
 
+A manager may wrap the command in `ssh -o BatchMode=yes -R <manager port>:127.0.0.1:<manager port> [options] host env
+_LAUNCHED_BY_PROXY_MANAGER=1 <python> ...` to run the proxy on another host; nothing else changes.
+
 A port is launched the same way by whatever command it registers for (the manager composes the argument list; every
 option is `--name value`, booleans as `true`/`false`). The environment carries `_LAUNCHED_BY_PROXY_MANAGER=1`.
 
@@ -142,7 +145,8 @@ JSON object per line with the Python `LogRecord` attribute names (`name`, `level
 `lineno`, `funcName`, `created`, `msecs`, `process`, `msg` already interpolated, `exc_text` for a traceback; other
 attributes may be present and are ignored by readers that do not know them). After registration it sends the same
 objects in `LOG` batches over the socket, every 0.2 s or 64 records, from a bounded, rate-limited queue; records it
-had to drop are counted in `dropped`. The manager handles both channels identically and logs the dropped count.
+had to drop are counted in `dropped`. On a persistent connection a sender should write LOG frames only when no other
+frame is waiting. The manager handles both channels identically and logs the dropped count.
 
 A non-JSON line on stderr is logged at WARNING, on stdout at INFO, unless it starts with a syslog-style severity
 prefix: `<7>` DEBUG, `<6>` and `<5>` INFO, `<4>` WARNING, `<3>` ERROR, `<2>`, `<1>`, `<0>` CRITICAL.

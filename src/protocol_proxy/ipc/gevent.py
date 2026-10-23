@@ -46,14 +46,27 @@ class GeventConnection:
         self.write_lock = RLock()
         self.pending: set[int] = set()
         self.closed = Event()
+        self._urgent = 0                 # ordinary writers waiting for or holding the lock; low-priority ones yield
 
     @property
     def alive(self) -> bool:
         return not self.closed.is_set()
 
-    def write(self, data: bytes):
-        with self.write_lock:
-            self.sock.sendall(data)
+    def write(self, data: bytes, low_priority: bool = False):
+        """Write a whole frame. A low-priority frame (a LOG batch) waits while any ordinary frame is waiting or being
+        written, so logging rides in the gaps of protocol traffic instead of ahead of it."""
+        if low_priority:
+            while self._urgent and self.alive:
+                sleep(0.001)
+            with self.write_lock:
+                self.sock.sendall(data)
+            return
+        self._urgent += 1
+        try:
+            with self.write_lock:
+                self.sock.sendall(data)
+        finally:
+            self._urgent -= 1
 
     def close(self):
         if not self.closed.is_set():
@@ -232,7 +245,7 @@ class GeventIPCConnector(IPCConnector):
             conn = self._link(remote, address)
             if message.response_expected:
                 conn.pending.add(message.request_id)
-            conn.write(frame)
+            conn.write(frame, low_priority=message.low_priority)
         except (OSError, Exception) as e:
             if not self._stop:
                 _log.warning(f'{self.proxy_name}: Unable to send {message.method_name}'

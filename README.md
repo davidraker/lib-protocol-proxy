@@ -123,7 +123,17 @@ returns every peer's state (`launching`, `registered`, `healthy`, `unhealthy`, `
 misses, advertised features (`REGISTER_PEER` now carries `"features": ["ping", "log", "set_log_level"]`), pid,
 connection policy and last report.
 
-## Logging
+## Remote proxies over SSH
+
+`get_proxy(key, ssh_host='user@host', ssh_options=[...], remote_python='/path/python', remote_env={...})` launches
+the proxy on another machine with the same command, wrapped as `ssh -o BatchMode=yes -R <manager port>:127.0.0.1:<manager
+port> [options] host env _LAUNCHED_BY_PROXY_MANAGER=1 [remote_env...] <remote_python> -m protocol_proxy.proxy ...`.
+Tokens and the key still travel on stdin (inside SSH), logs still arrive on the pipes, and the reverse forward lets the
+proxy reach this manager at `127.0.0.1:<manager port>` on its own host (`--manager-address` is set to that; pass
+`ssh_forward=False` and your own `manager_address` to dial directly). With the default persistent connection the manager
+never needs to dial the proxy, so no forward in the other direction is required. These options are the manager's own
+and are not passed to the proxy.
+
 
 A proxy launched by a manager logs through one channel: every record is one JSON object per line on **stderr**, with
 the `LogRecord` attribute names (`name`, `levelno`, `levelname`, `pathname`, `lineno`, `funcName`, `created`,
@@ -143,7 +153,8 @@ otherwise). The queue is bounded (2000 records) and rate-limited (50 records/s s
 beyond that are dropped and counted, and the manager logs the count as a WARNING. stderr still carries everything
 before registration and whatever is queued at exit, so a proxy that dies early is still heard. The socket is the
 channel every launch mode has (a remote proxy's stderr may never reach the manager) and it will be the encrypted one.
-`--socket-logging False` keeps stderr throughout. `manager.set_proxy_log_level(peer, 'DEBUG')` sends
+`--socket-logging False` keeps stderr throughout. On a persistent connection LOG batches are written only when no
+ordinary frame is waiting (gevent) or queued on the transport (asyncio), so logging never delays protocol traffic. `manager.set_proxy_log_level(peer, 'DEBUG')` sends
 `SET_LOG_LEVEL` to a running proxy and gates the manager's logger for it at the same level, so a remote proxy's
 verbosity can be raised for a while without a restart.
 

@@ -30,6 +30,7 @@ class AsyncioIPCConnector(IPCConnector):
     frames in both directions, is dialled on demand and redialled after a loss, and a frame arriving with the
     keep-alive bit on an accepted connection makes that connection the way back to its authenticated sender."""
     KEEPALIVE = {'TCP_KEEPIDLE': 15, 'TCP_KEEPINTVL': 5, 'TCP_KEEPCNT': 4}
+    LOW_PRIORITY_WAIT = 0.5          # longest a low-priority frame waits for the transport's queue to drain
 
     def __init__(self, *, proxy_id, token, proxy_name: str = None, connect_timeout: float = 30.0, **kwargs):
         self.inbound_server: Server | None = None
@@ -88,6 +89,12 @@ class AsyncioIPCConnector(IPCConnector):
             return await self._send_per_message(remote, address, message, result)   # its own connection
         try:
             protocol = await self._link(remote, address)
+            if message.low_priority:
+                # Let the frames already queued on the transport go first; a LOG batch can wait a little.
+                waited = 0.0
+                while protocol.alive and protocol.transport.get_write_buffer_size() and waited < self.LOW_PRIORITY_WAIT:
+                    await asyncio.sleep(0.005)
+                    waited += 0.005
             if message.response_expected:
                 protocol.pending.add(message.request_id)
             protocol.transport.write(protocol._message_to_bytes(message, keep_alive=True, remote=remote))

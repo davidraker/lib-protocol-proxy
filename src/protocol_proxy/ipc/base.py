@@ -35,6 +35,9 @@ class ProtocolProxyMessage:
     remote_id: UUID | None = None
     #: Header version to send. Version 2 is the default for every message; 1 is for a peer that predates it.
     protocol_version: int = 2
+    #: On a persistent connection, written only when no ordinary frame is waiting to be written (LOG batches), so
+    #: logging never delays protocol traffic.
+    low_priority: bool = False
 
 
 class SocketParams(NamedTuple):

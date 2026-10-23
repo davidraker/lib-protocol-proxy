@@ -390,3 +390,39 @@ def test_encrypted_peers_exchange_in_both_directions_and_refuse_mismatches(pair)
         result.get(timeout=2)
     peer_b.key = None
     assert request(a, peer_b, 'NOTE', b'clear again') == b'clear again'
+
+
+# ---- write priority ---------------------------------------------------------------------------------------------
+
+def test_low_priority_frames_wait_for_ordinary_ones(pair):
+    """A LOG batch on a persistent connection is written only when no ordinary frame is waiting."""
+    from unittest import mock
+    a, b, peer_b = pair
+    peer_b.persistent = True
+    b.register_callback(echo, 'ECHO', provides_response=True)
+    assert request(a, peer_b, 'ECHO', b'open') == b'open'
+    conn = peer_b.connection
+    order = []
+    real_sock = conn.sock
+
+    class SlowSocket:
+        """The real socket, with a sendall that records who is writing and takes a while."""
+        def __getattr__(self, name):
+            return getattr(real_sock, name)
+
+        def sendall(self, data):
+            order.append(('urgent' if conn._urgent else 'low', len(data)))
+            sleep(0.05)
+            return real_sock.sendall(data)
+    with mock.patch.object(conn, 'sock', SlowSocket()):
+        low = spawn(conn.write, a._frame(ProtocolProxyMessage(method_name='LOG', payload=b'l' * 10, request_id=1,
+                                                              low_priority=True), keep_alive=True), True)
+        sleep(0.01)                                               # the low-priority write is in its sendall
+        urgent = [spawn(conn.write, a._frame(ProtocolProxyMessage(method_name='PING', payload=b'', request_id=i),
+                                             keep_alive=True)) for i in range(2, 5)]
+        sleep(0.01)
+        second_low = spawn(conn.write, a._frame(ProtocolProxyMessage(method_name='LOG', payload=b'l' * 10, request_id=5,
+                                                                     low_priority=True), keep_alive=True), True)
+        gevent.joinall([low, *urgent, second_low], timeout=5)
+    kinds = [kind for kind, _ in order]
+    assert kinds[0] == 'low' and kinds[-1] == 'low' and kinds[1:4] == ['urgent'] * 3   # the waiting LOG went last

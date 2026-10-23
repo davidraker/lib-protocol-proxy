@@ -77,18 +77,22 @@ class ProtocolProxyManager(IPCConnector, ABC):
         if proxy_id not in self.peers:
             #_log.debug(f'@@@@@@@@@ PROXY_ID IS NOT IN PEERS. SETTING UP COMMAND.')
             module, func = self.proxy_class.__module__, self.proxy_class.__name__
+            prefix, python, _ = self.launcher_prefix(kwargs)
+            if prefix and kwargs.get('ssh_forward', True) and 'manager_address' not in kwargs:
+                kwargs = {**kwargs, 'manager_address': '127.0.0.1'}      # the forwarded port on the proxy's host
             kwargs = {k: v for k, v in kwargs.items() if k not in self.MANAGER_ONLY_OPTIONS and v is not None}
             # The proxy logs at the level this manager would handle its records at, unless the caller chose one.
             kwargs.setdefault('log_level', logging.getLevelName(self.proxy_logger(proxy_name).getEffectiveLevel()))
             if self.encrypt:
                 kwargs.setdefault('encrypt', True)      # the proxy must read the key the manager writes to stdin
-            protocol_specific_params = [i for pair in [(f"--{k.replace('_', '-')}", str(v))
-                                                       for k, v in kwargs.items()] for i in pair]
             # Launched through the generic entry point so the proxy module is imported exactly once (see launch.main).
             entry_options = ['--gevent'] if getattr(self.proxy_class, 'PATCH_GEVENT', False) else []
-            command = [sys.executable, '-m', 'protocol_proxy.proxy', *entry_options, f'{module}:{func}',
+            manager_address = kwargs.pop('manager_address', self.inbound_params.address)
+            protocol_specific_params = [i for pair in [(f"--{k.replace('_', '-')}", str(v))
+                                                       for k, v in kwargs.items()] for i in pair]
+            command = [*prefix, python, '-m', 'protocol_proxy.proxy', *entry_options, f'{module}:{func}',
                        '--proxy-id', proxy_id.hex, '--proxy-name', proxy_name,
-                       '--manager-id', self.proxy_id.hex, '--manager-address', self.inbound_params.address,
+                       '--manager-id', self.proxy_id.hex, '--manager-address', str(manager_address),
                        '--manager-port', str(self.inbound_params.port), *protocol_specific_params]
         else:
             #_log.debug(f'@@@@@@@@@ PROXY_ID IS IN PEERS. NOT SETTING UP COMMAND.')
@@ -262,7 +266,28 @@ class ProtocolProxyManager(IPCConnector, ABC):
         return self.encrypt if value is None else str2bool(value)
 
     #: get_proxy kwargs the manager consumes itself; everything else travels to the proxy as ``--name value``.
-    MANAGER_ONLY_OPTIONS = frozenset({'manager_callbacks', 'dial'})
+    MANAGER_ONLY_OPTIONS = frozenset({'manager_callbacks', 'dial', 'ssh_host', 'ssh_options', 'ssh_forward',
+                                      'remote_python', 'remote_env'})
+    SSH_BASE_OPTIONS = ('-o', 'BatchMode=yes')
+
+    def launcher_prefix(self, kwargs: dict) -> tuple[list[str], str, dict[str, str]]:
+        """How the proxy command is wrapped: ``(prefix, python, env)``. Locally the prefix is empty, python is this
+        interpreter and env is the manager's with the launch marker. With ``ssh_host`` the prefix is
+        ``ssh -o BatchMode=yes [-R <manager port>:127.0.0.1:<manager port>] [ssh_options...] host`` and the remote
+        command is ``env <marker> [remote_env...] <remote_python> -m protocol_proxy.proxy ...``: the same argument
+        list, tokens (and key) still on stdin, logs still on the pipes. The reverse forward (``ssh_forward``, default
+        True) lets the proxy dial ``127.0.0.1:<manager port>`` on its host and reach this manager; with persistent
+        connections the manager never needs to dial the proxy, so no forward the other way is required."""
+        env = self.proxy_environment()
+        if not (host := kwargs.get('ssh_host')):
+            return [], sys.executable, env
+        prefix = ['ssh', *self.SSH_BASE_OPTIONS]
+        if kwargs.get('ssh_forward', True) and self.inbound_params is not None:
+            port = self.inbound_params.port
+            prefix += ['-R', f'{port}:127.0.0.1:{port}']
+        prefix += [*(kwargs.get('ssh_options') or []), str(host), 'env', f'{LAUNCHED_BY_MANAGER_ENV}=1']
+        prefix += [f'{k}={v}' for k, v in (kwargs.get('remote_env') or {}).items()]
+        return prefix, str(kwargs.get('remote_python') or 'python3'), env
 
     @staticmethod
     def dial_target(kwargs: dict) -> SocketParams | None:

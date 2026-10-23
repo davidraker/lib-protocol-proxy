@@ -129,7 +129,7 @@ class ProtocolProxy(IPCConnector, metaclass=abc.ABCMeta):
         if not records and not dropped:
             return None
         payload = json.dumps({'records': records, 'dropped': dropped}, default=str).encode('utf8')
-        return ProtocolProxyMessage(method_name='LOG', payload=payload)
+        return ProtocolProxyMessage(method_name='LOG', payload=payload, low_priority=True)
 
     def stop_socket_logging(self):
         """Back to stderr: what is still queued goes out as JSON lines there, so the manager reads it from the pipe."""
