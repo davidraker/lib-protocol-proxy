@@ -190,3 +190,14 @@ def test_encrypted_bit_round_trips():
         headers = cls.unpack(cls(3, 'M', 7, sender, token, encrypted=True, compressed=True).pack()[2:])
         assert headers.encrypted and headers.compressed and not headers.keep_alive
     assert HeadersV1.ENCRYPTED_BIT == 2
+
+
+def test_aes_gcm_bit_round_trips():
+    from uuid import uuid4
+    from protocol_proxy.ipc import HeadersV1, HeadersV2
+    sender, token = uuid4(), uuid4()
+    for cls in (HeadersV1, HeadersV2):
+        headers = cls.unpack(cls(3, 'M', 7, sender, token, encrypted=True, aes_gcm=True).pack()[2:])
+        assert headers.encrypted and headers.aes_gcm
+        assert not cls.unpack(cls(3, 'M', 7, sender, token, encrypted=True).pack()[2:]).aes_gcm
+    assert HeadersV1.AES_GCM_BIT == 4

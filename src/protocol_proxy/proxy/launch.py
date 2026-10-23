@@ -53,6 +53,9 @@ def proxy_command_parser(parser: ArgumentParser = None):
                         help='Address of the inbound socket from the Proxy Manager')
     parser.add_argument('--inbound-port', type=int, default=None,
                         help='Port of the inbound socket from the Proxy Manager. Chosen automatically if omitted.')
+    parser.add_argument('--cipher', type=str, default='auto', choices=['auto', 'aes-256-gcm', 'chacha20-poly1305'],
+                        help='The AEAD used when encrypting toward the manager: auto picks AES-256-GCM on a CPU with AES'
+                             ' instructions, else ChaCha20-Poly1305. The manager passes its own choice.')
     parser.add_argument('--ipc-tls', type=str2bool, default=False,
                         help='Every IPC connection with the manager is TLS, with the certificate, key and CA the manager'
                              ' writes to stdin after the tokens (and key). Both ends verify each other.')

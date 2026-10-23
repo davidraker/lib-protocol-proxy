@@ -100,16 +100,22 @@ class IPCConnector(metaclass=ABCMeta):
     #: Payloads larger than this are zlib-compressed toward a peer that advertised ``compress``.
     COMPRESS_THRESHOLD = 4096
     #: What this connector tells its peers it understands (proxies in REGISTER_PEER, the manager in its reply).
-    FEATURES: ClassVar[tuple[str, ...]] = ('compress', 'aead-chacha20poly1305')
+    FEATURES: ClassVar[tuple[str, ...]] = ('compress', 'aead-chacha20poly1305', 'aead-aes256gcm')
     KEY_BYTES = 32
     NONCE_BYTES = 12
     TAG_BYTES = 16
+    #: AEAD ciphers by configuration name: the feature a peer must advertise to receive it, and whether the header's
+    #: AES-GCM bit is set. ChaCha20-Poly1305 is the baseline every implementation must accept; AES-256-GCM is the
+    #: faster choice on a CPU with AES instructions. Both take the same 32-byte key, 12-byte nonce and 16-byte tag.
+    CIPHERS: ClassVar[dict[str, tuple[str, bool]]] = {'chacha20-poly1305': ('aead-chacha20poly1305', False),
+                                                      'aes-256-gcm': ('aead-aes256gcm', True)}
+    BASELINE_CIPHER = 'chacha20-poly1305'
 
     def __init__(self, *, proxy_id: UUID, token: UUID, proxy_name: str = None, inbound_params: SocketParams = None,
                  chunk_size: int = 1024, encrypt: bool = False, min_port: int = 22801, max_port: int = 22899,
                  persistent: bool = False, persistent_max_frame: int | None = PERSISTENT_MAX_FRAME,
                  compress_threshold: int | None = COMPRESS_THRESHOLD, tls_material: '_tls.TlsMaterial | None' = None,
-                 **kwargs):
+                 cipher: str = 'auto', **kwargs):
         """ Handles socket communication between ProtocolProxy and ProtocolProxyManager.
 
         Connection lifetime is a policy per peer (``ProtocolProxyPeer.persistent``), defaulting to ``persistent``
@@ -126,6 +132,9 @@ class IPCConnector(metaclass=ABCMeta):
         self.persistent: bool = persistent
         self.persistent_max_frame: int | None = persistent_max_frame
         self.compress_threshold: int | None = compress_threshold
+        # The AEAD this end uses when it encrypts: configured, or 'auto' (AES-256-GCM when the CPU has AES
+        # instructions, else ChaCha20-Poly1305). A peer that did not advertise the chosen cipher gets the baseline.
+        self.cipher: str = self.resolve_cipher(cipher)
         # Our certificate, key and CA for TLS connections (None: this end has no TLS identity). Contexts are built
         # lazily; a flavour may use a cooperative SSLContext class (gevent).
         self.tls_material: _tls.TlsMaterial | None = tls_material
@@ -191,12 +200,44 @@ class IPCConnector(metaclass=ABCMeta):
         return payload
 
     @staticmethod
-    def _aead(key: bytes):
+    def _aead(key: bytes, aes_gcm: bool = False):
         try:
-            from cryptography.hazmat.primitives.ciphers.aead import ChaCha20Poly1305
+            from cryptography.hazmat.primitives.ciphers.aead import AESGCM, ChaCha20Poly1305
         except ImportError as e:    # pragma: no cover - cryptography is a dependency
             raise RuntimeError('Encrypted IPC needs the "cryptography" package.') from e
-        return ChaCha20Poly1305(key)
+        return AESGCM(key) if aes_gcm else ChaCha20Poly1305(key)
+
+    @staticmethod
+    def cpu_has_aes(cpuinfo: str | None = None) -> bool:
+        """Whether this CPU has AES instructions (x86 AES-NI or Arm AES), read from /proc/cpuinfo (Linux); False
+        where that cannot be read, so the baseline cipher is chosen."""
+        if cpuinfo is None:
+            try:
+                with open('/proc/cpuinfo') as f:
+                    cpuinfo = f.read()
+            except OSError:
+                return False
+        for line in cpuinfo.splitlines():
+            key, _, value = line.partition(':')
+            if key.strip().lower() in ('flags', 'features'):
+                return 'aes' in value.split()
+        return False
+
+    @classmethod
+    def resolve_cipher(cls, cipher: str | None) -> str:
+        """The cipher name for a configuration value: a known name as given, 'auto' (or None) by CPU detection."""
+        if cipher in (None, '', 'auto'):
+            return 'aes-256-gcm' if cls.cpu_has_aes() else cls.BASELINE_CIPHER
+        if cipher not in cls.CIPHERS:
+            raise ValueError(f'Unknown cipher {cipher!r}; choose from {", ".join(cls.CIPHERS)} or auto.')
+        return cipher
+
+    def cipher_for(self, remote: ProtocolProxyPeer | None) -> str:
+        """The cipher to use toward this peer: ours, unless the peer has advertised its features and they do not
+        include it, in which case the baseline (which every implementation accepts)."""
+        if remote is not None and remote.features and self.CIPHERS[self.cipher][0] not in remote.features:
+            return self.BASELINE_CIPHER
+        return self.cipher
 
     @classmethod
     def new_key(cls) -> bytes:
@@ -204,16 +245,17 @@ class IPCConnector(metaclass=ABCMeta):
 
     def seal(self, remote: ProtocolProxyPeer | None, payload: bytes, pack_header: Callable[[int, bool, bool], bytes]) -> bytes:
         """The wire frame of ``payload`` toward ``remote``: compressed when the peer takes it, then encrypted when a
-        key is shared with it. ``pack_header(data_length, compressed, encrypted)`` returns the header bytes (version
-        word included); for an encrypted frame those bytes are the associated data, so the method name, request id,
-        sender, remote and flags cannot be altered or moved onto another message without detection."""
+        key is shared with it. ``pack_header(data_length, compressed, encrypted, aes_gcm)`` returns the header bytes
+        (version word included); for an encrypted frame those bytes are the associated data, so the method name,
+        request id, sender, remote and flags cannot be altered or moved onto another message without detection."""
         payload, compressed = self.encode_payload(remote, payload)
         key = remote.key if remote is not None else None
         if key is None:
-            return pack_header(len(payload), compressed, False) + payload
-        header = pack_header(len(payload) + self.NONCE_BYTES + self.TAG_BYTES, compressed, True)
+            return pack_header(len(payload), compressed, False, False) + payload
+        aes_gcm = self.CIPHERS[self.cipher_for(remote)][1]
+        header = pack_header(len(payload) + self.NONCE_BYTES + self.TAG_BYTES, compressed, True, aes_gcm)
         nonce = os.urandom(self.NONCE_BYTES)
-        return header + nonce + self._aead(key).encrypt(nonce, payload, header)
+        return header + nonce + self._aead(key, aes_gcm).encrypt(nonce, payload, header)
 
     def open_frame(self, headers: ProtocolHeaders, raw_header: bytes, payload: bytes) -> bytes:
         """The payload as the sender had it: decrypted (and authenticated against ``raw_header``) when the frame is
@@ -228,7 +270,7 @@ class IPCConnector(metaclass=ABCMeta):
             if len(payload) < self.NONCE_BYTES + self.TAG_BYTES:
                 raise PermissionError(f'encrypted {headers.method_name} from {headers.sender_id} is too short')
             nonce, body = bytes(payload[:self.NONCE_BYTES]), bytes(payload[self.NONCE_BYTES:])
-            payload = self._aead(key).decrypt(nonce, body, bytes(raw_header))
+            payload = self._aead(key, getattr(headers, 'aes_gcm', False)).decrypt(nonce, body, bytes(raw_header))
         elif key is not None:
             raise PermissionError(f'clear-text {headers.method_name} from {headers.sender_id}, who must encrypt')
         return self.decode_payload(headers, payload)

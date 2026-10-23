@@ -8,7 +8,7 @@ import zlib
 from pathlib import Path
 from uuid import UUID
 
-from cryptography.hazmat.primitives.ciphers.aead import ChaCha20Poly1305
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM, ChaCha20Poly1305
 
 from protocol_proxy.ipc import HeadersV1, HeadersV2
 from protocol_proxy.logs import JsonLineFormatter, SYSLOG_LEVELS
@@ -22,7 +22,7 @@ NONCE = bytes(range(12))
 
 
 def frame(cls, method, payload, request_id, *, response_expected=False, keep_alive=False, compressed=False,
-          encrypted=False, remote_id=None, compress=False, key=None):
+          encrypted=False, remote_id=None, compress=False, key=None, aes_gcm=False):
     """A frame as the Python connectors build it, with the compressed and encrypted transforms applied in order."""
     plain = payload
     if compress:
@@ -30,8 +30,9 @@ def frame(cls, method, payload, request_id, *, response_expected=False, keep_ali
     extra = {'remote_id': remote_id} if cls is HeadersV2 else {}
     if key is not None:
         header = cls(len(payload) + 12 + 16, method, request_id, SENDER, TOKEN, response_expected,
-                     keep_alive=keep_alive, compressed=compressed, encrypted=True, **extra).pack()
-        wire = header + NONCE + ChaCha20Poly1305(key).encrypt(NONCE, payload, header)
+                     keep_alive=keep_alive, compressed=compressed, encrypted=True, aes_gcm=aes_gcm, **extra).pack()
+        aead = AESGCM(key) if aes_gcm else ChaCha20Poly1305(key)
+        wire = header + NONCE + aead.encrypt(NONCE, payload, header)
     else:
         header = cls(len(payload), method, request_id, SENDER, TOKEN, response_expected, keep_alive=keep_alive,
                      compressed=compressed, encrypted=False, **extra).pack()
@@ -39,7 +40,7 @@ def frame(cls, method, payload, request_id, *, response_expected=False, keep_ali
     return {'header_hex': header.hex(), 'frame_hex': wire.hex(), 'payload_utf8': plain.decode('utf8'),
             'method_name': method, 'request_id': request_id, 'response_expected': response_expected,
             'keep_alive': keep_alive, 'compressed': compressed, 'encrypted': key is not None,
-            'remote_id': str(remote_id) if remote_id else None, 'header_version': cls.VERSION}
+            'remote_id': str(remote_id) if remote_id else None, 'header_version': cls.VERSION, 'aes_gcm': aes_gcm}
 
 
 def vectors() -> dict:
@@ -53,7 +54,8 @@ def vectors() -> dict:
             'header_length_v1': HeadersV1.HEADER_LENGTH, 'header_length_v2': HeadersV2.HEADER_LENGTH,
             'version_word_bytes': 2, 'bit_response_expected': HeadersV1.RESPONSE_EXPECTED_BIT,
             'bit_compressed': HeadersV1.COMPRESSED_BIT, 'bit_encrypted': HeadersV1.ENCRYPTED_BIT,
-            'bit_keep_alive': HeadersV1.KEEP_ALIVE_BIT, 'request_id_max_v1': HeadersV1.REQUEST_ID_MAX,
+            'bit_keep_alive': HeadersV1.KEEP_ALIVE_BIT, 'bit_aes_gcm': HeadersV1.AES_GCM_BIT,
+            'request_id_max_v1': HeadersV1.REQUEST_ID_MAX,
             'request_id_max_v2': HeadersV2.REQUEST_ID_MAX, 'nonce_bytes': 12, 'tag_bytes': 16, 'key_bytes': 32,
             'stdin_layout': 'proxy token hex (32) + manager token hex (32) [+ key hex (64) with --encrypt true]',
             'syslog_prefix_levels': {f'<{n}>': logging.getLevelName(level) for n, level in SYSLOG_LEVELS.items()},
@@ -69,7 +71,8 @@ def vectors() -> dict:
                                         remote_id=REMOTE),
             'v2_register_peer': frame(HeadersV2, 'REGISTER_PEER', json.dumps(
                 {'address': '127.0.0.1', 'port': 22802, 'proxy_id': SENDER.hex, 'token': TOKEN.hex,
-                 'features': ['ping', 'log', 'set_log_level', 'compress', 'aead-chacha20poly1305']}).encode(), 1,
+                 'features': ['ping', 'log', 'set_log_level', 'compress', 'aead-chacha20poly1305', 'aead-aes256gcm'],
+                 'cipher': 'chacha20-poly1305'}).encode(), 1,
                 response_expected=True),
             'v2_compressed': frame(HeadersV2, 'REGISTER_REMOTE', (b'{"points": [' + b', '.join(
                 b'{"name": "p%d", "index": %d}' % (i, i) for i in range(200)) + b']}'), 8, response_expected=True,
@@ -79,6 +82,8 @@ def vectors() -> dict:
             'v2_compressed_encrypted': frame(HeadersV2, 'LOG', (b'{"records": [' + b', '.join(
                 b'{"name": "x", "levelno": 20, "msg": "tick %d"}' % i for i in range(300)) + b'], "dropped": 0}'), 10,
                 compress=True, key=KEY),
+            'v2_encrypted_aes_gcm': frame(HeadersV2, 'WRITE_POINTS', b'{"values": {"a": 1}}', 12, response_expected=True,
+                                          remote_id=REMOTE, key=KEY, aes_gcm=True),
             'v2_error_reply': frame(HeadersV2, 'RESPONSE', json.dumps(
                 {'status': 'error', 'error': 'Unknown method NOPE', 'method': 'NOPE'}).encode(), 11),
         },
@@ -90,7 +95,7 @@ def vectors() -> dict:
             'log_batch_payload': json.dumps({'records': [json.loads(JsonLineFormatter().format(record))], 'dropped': 2}),
             'set_log_level_request': '{"level": "DEBUG"}', 'set_log_level_reply': '{"level": "DEBUG"}',
             'ping_reply_example': '{"uptime": 12.345, "remotes": 3, "busy": false, "last_activity": "2026-10-22T20:00:00+00:00"}',
-            'register_peer_reply': '{"registered": true, "features": ["compress", "aead-chacha20poly1305"]}',
+            'register_peer_reply': '{"registered": true, "features": ["compress", "aead-chacha20poly1305", "aead-aes256gcm"]}',
         },
     }
 

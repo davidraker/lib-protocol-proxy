@@ -64,11 +64,12 @@ class HeadersV1(ProtocolHeaders):
     COMPRESSED_BIT = 1
     ENCRYPTED_BIT = 2
     KEEP_ALIVE_BIT = 3
+    AES_GCM_BIT = 4
     VERSION = 1
 
     def __init__(self, data_length: int, method_name: str, request_id: int, sender_id, sender_token,
                  response_expected: bool = False, keep_alive: bool = False, compressed: bool = False,
-                 encrypted: bool = False, **kwargs):
+                 encrypted: bool = False, aes_gcm: bool = False, **kwargs):
         super(HeadersV1, self).__init__(data_length, method_name, request_id, sender_id, sender_token, **kwargs)
         self.response_expected: bool = response_expected  # Position 0 in bitflags within struct.
         # The payload is zlib-compressed (data_length counts the compressed bytes).
@@ -76,6 +77,8 @@ class HeadersV1(ProtocolHeaders):
         # The payload is nonce + AEAD ciphertext + tag, with this whole header (version word included) as the
         # associated data; data_length counts the wire bytes.
         self.encrypted: bool = encrypted
+        # With encrypted: the AEAD is AES-256-GCM rather than the baseline ChaCha20-Poly1305 (same key, nonce, tag).
+        self.aes_gcm: bool = aes_gcm
         # The sender keeps this connection open for further frames in both directions (a persistent connection); the
         # receiver may send to the authenticated sender on it instead of dialling the sender's advertised address.
         self.keep_alive: bool = keep_alive
@@ -84,7 +87,8 @@ class HeadersV1(ProtocolHeaders):
         return ((int(self.response_expected) << self.RESPONSE_EXPECTED_BIT)
                 | (int(self.compressed) << self.COMPRESSED_BIT)
                 | (int(self.encrypted) << self.ENCRYPTED_BIT)
-                | (int(self.keep_alive) << self.KEEP_ALIVE_BIT))
+                | (int(self.keep_alive) << self.KEEP_ALIVE_BIT)
+                | (int(self.aes_gcm) << self.AES_GCM_BIT))
 
     def pack(self):
         return super(HeadersV1, self).pack() + struct.pack(f'>H', self._bitflags())    # 2 byte (16-bit) bitflags.
@@ -98,7 +102,8 @@ class HeadersV1(ProtocolHeaders):
                    cls.bitflag_is_set(cls.RESPONSE_EXPECTED_BIT, bitflags),
                    keep_alive=cls.bitflag_is_set(cls.KEEP_ALIVE_BIT, bitflags),
                    compressed=cls.bitflag_is_set(cls.COMPRESSED_BIT, bitflags),
-                   encrypted=cls.bitflag_is_set(cls.ENCRYPTED_BIT, bitflags))
+                   encrypted=cls.bitflag_is_set(cls.ENCRYPTED_BIT, bitflags),
+                   aes_gcm=cls.bitflag_is_set(cls.AES_GCM_BIT, bitflags))
 
 
 class HeadersV2(HeadersV1):
@@ -141,7 +146,8 @@ class HeadersV2(HeadersV1):
                    cls.bitflag_is_set(cls.RESPONSE_EXPECTED_BIT, bitflags), remote_id,
                    keep_alive=cls.bitflag_is_set(cls.KEEP_ALIVE_BIT, bitflags),
                    compressed=cls.bitflag_is_set(cls.COMPRESSED_BIT, bitflags),
-                   encrypted=cls.bitflag_is_set(cls.ENCRYPTED_BIT, bitflags))
+                   encrypted=cls.bitflag_is_set(cls.ENCRYPTED_BIT, bitflags),
+                   aes_gcm=cls.bitflag_is_set(cls.AES_GCM_BIT, bitflags))
 
     def __repr__(self):
-        return super(HeadersV2, self).__repr__() + f', remote_id={self.remote_id}, keep_alive={self.keep_alive}, compressed={self.compressed}, encrypted={self.encrypted}'
+        return super(HeadersV2, self).__repr__() + f', remote_id={self.remote_id}, keep_alive={self.keep_alive}, compressed={self.compressed}, encrypted={self.encrypted}, aes_gcm={self.aes_gcm}'

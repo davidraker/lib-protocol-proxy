@@ -426,3 +426,40 @@ def test_low_priority_frames_wait_for_ordinary_ones(pair):
         gevent.joinall([low, *urgent, second_low], timeout=5)
     kinds = [kind for kind, _ in order]
     assert kinds[0] == 'low' and kinds[-1] == 'low' and kinds[1:4] == ['urgent'] * 3   # the waiting LOG went last
+
+
+# ---- cipher choice -------------------------------------------------------------------------------------------------
+
+def test_cipher_detection_and_configuration():
+    from protocol_proxy.ipc import IPCConnector
+    x86 = 'processor\t: 0\nflags\t\t: fpu vme sse2 aes avx2\n'
+    arm = 'processor\t: 0\nFeatures\t: fp asimd aes pmull sha2\n'
+    old = 'processor\t: 0\nflags\t\t: fpu vme sse2\n'
+    assert IPCConnector.cpu_has_aes(x86) and IPCConnector.cpu_has_aes(arm) and not IPCConnector.cpu_has_aes(old)
+    assert not IPCConnector.cpu_has_aes('')
+    assert IPCConnector.resolve_cipher('aes-256-gcm') == 'aes-256-gcm'
+    assert IPCConnector.resolve_cipher('chacha20-poly1305') == 'chacha20-poly1305'
+    assert IPCConnector.resolve_cipher('auto') in IPCConnector.CIPHERS
+    with pytest.raises(ValueError):
+        IPCConnector.resolve_cipher('rot13')
+
+
+def test_each_side_encrypts_with_its_own_cipher_and_falls_back_for_a_peer_without_aes(pair):
+    a, b, peer_b = pair
+    peer_a = b.peers[a.proxy_id]
+    a.cipher, b.cipher = 'aes-256-gcm', 'chacha20-poly1305'
+    key = a.new_key()
+    peer_b.key = peer_a.key = key
+    peer_b.features = peer_a.features = ('aead-chacha20poly1305', 'aead-aes256gcm')
+    seen = {}
+
+    def note(ipc, headers, raw):
+        seen[ipc.proxy_name] = (headers.encrypted, headers.aes_gcm)
+        return raw
+    a.register_callback(note, 'NOTE', provides_response=True)
+    b.register_callback(note, 'NOTE', provides_response=True)
+    assert request(a, peer_b, 'NOTE', b'to b') == b'to b' and seen['B'] == (True, True)      # a sends AES-GCM
+    assert request(b, peer_a, 'NOTE', b'to a') == b'to a' and seen['A'] == (True, False)     # b sends ChaCha20
+    peer_b.features = ('aead-chacha20poly1305',)                     # a peer that only accepts the baseline
+    assert request(a, peer_b, 'NOTE', b'again') == b'again' and seen['B'] == (True, False)
+    assert a.cipher_for(peer_b) == 'chacha20-poly1305' and a.cipher_for(peer_a) == 'aes-256-gcm'

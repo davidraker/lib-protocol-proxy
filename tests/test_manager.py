@@ -235,3 +235,16 @@ def test_encrypting_manager_writes_a_key_after_the_tokens_and_passes_the_option(
         assert peer.key is None and len(FakeProcess.last_stdin) == 64 and '--encrypt' not in FakeProcess.last_args[0]
         peer = plain.get_proxy(('dummy', 'z'), encrypt=True)      # per proxy
         assert len(peer.key) == 32 and len(FakeProcess.last_stdin) == 128
+
+
+def test_cipher_travels_to_encrypted_proxies_only():
+    manager = GeventProtocolProxyManager(proxy_class=DummyProxy, encrypt=True, cipher='chacha20-poly1305')
+    manager.inbound_params = SocketParams('127.0.0.1', 22801)
+    command, *_ = manager._setup_proxy_process_command(('dummy', 'c'))
+    assert command[command.index('--cipher') + 1] == 'chacha20-poly1305'
+    command, *_ = manager._setup_proxy_process_command(('dummy', 'd'), cipher='aes-256-gcm')
+    assert command[command.index('--cipher') + 1] == 'aes-256-gcm'                 # per proxy
+    plain = GeventProtocolProxyManager(proxy_class=DummyProxy)
+    plain.inbound_params = SocketParams('127.0.0.1', 22801)
+    command, *_ = plain._setup_proxy_process_command(('dummy', 'e'))
+    assert '--cipher' not in command                                               # nothing to encrypt with

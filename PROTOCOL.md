@@ -13,7 +13,8 @@ The manager launches a proxy as
 ```
 python -m protocol_proxy.proxy [--gevent] <module>:<ProxyClass> --proxy-id <hex> --proxy-name <str>
     --manager-id <hex> --manager-address <host> --manager-port <int> [--inbound-address <host>]
-    [--inbound-port <int>] [--encrypt true|false] [--ipc-tls true|false] [--manager-dials true|false]
+    [--inbound-port <int>] [--encrypt true|false] [--cipher auto|aes-256-gcm|chacha20-poly1305] [--ipc-tls true|false]
+    [--manager-dials true|false]
     [--persistent true|false] [--socket-logging true|false]
     [--compress-threshold <int>] [--log-level <LEVEL>] [--<protocol option> <value> ...]
 ```
@@ -83,6 +84,7 @@ request_id, sender_id, sender_token, bitflags, remote_id). `struct` notation: ve
 | 1 | compressed | the payload is zlib-compressed (§4) |
 | 2 | encrypted | the payload is nonce + AEAD ciphertext + tag (§5) |
 | 3 | keep-alive | the sender keeps this connection open for frames in both directions (§2) |
+| 4 | AES-GCM | with bit 2: the AEAD is AES-256-GCM instead of ChaCha20-Poly1305 (§5) |
 
 Payloads are UTF-8 JSON before compression or encryption. An empty payload is allowed.
 
@@ -96,8 +98,12 @@ decrypt, then decompress.
 ## 5. Encryption (2026-10-22)
 
 When the two ends share a key (§1), every frame between them is encrypted, registration included. The payload on the
-wire is a 12-byte random nonce, the ChaCha20-Poly1305 ciphertext of the (possibly compressed) payload, and the 16-byte
-tag; `data_length` counts all of it; bit 2 is set. The associated data is the whole header as sent, version word
+wire is a 12-byte random nonce, the AEAD ciphertext of the (possibly compressed) payload, and the 16-byte tag;
+`data_length` counts all of it; bit 2 is set. The AEAD is ChaCha20-Poly1305, which every implementation must
+accept, or AES-256-GCM when bit 4 is also set (2026-10-23); both use the same 32-byte key, 12-byte nonce and
+16-byte tag. A sender uses AES-256-GCM toward a peer only if that peer advertised `aead-aes256gcm` (§7) or the
+manager launched it with `--cipher aes-256-gcm`; a receiver decides by the bit, frame by frame. `REGISTER_PEER`
+carries the proxy's own choice as `"cipher"`. The associated data is the whole header as sent, version word
 through `remote_id`, so method name, request id, sender, remote and flags cannot be altered or replayed onto another
 message without detection. The mode is fixed per peer: a receiver refuses a clear-text frame from a peer it shares a
 key with and an encrypted frame from one it does not; the refused request fails (or the connection is dropped) and
@@ -125,10 +131,11 @@ After its listener exists, the proxy sends `REGISTER_PEER` (response expected) w
 
 ```json
 {"address": "127.0.0.1", "port": 22802, "proxy_id": "<hex>", "token": "<hex>",
- "features": ["ping", "log", "set_log_level", "compress", "aead-chacha20poly1305"]}
+ "features": ["ping", "log", "set_log_level", "compress", "aead-chacha20poly1305", "aead-aes256gcm"],
+ "cipher": "aes-256-gcm"}
 ```
 
-and the manager replies `{"registered": true, "features": ["compress", "aead-chacha20poly1305"]}` (older managers
+and the manager replies `{"registered": true, "features": ["compress", "aead-chacha20poly1305", "aead-aes256gcm"]}` (older managers
 reply plain `true` or `false`; proxies accept both). Two attempts, 5 s response timeout, 20 s between attempts;
 failure stops the proxy. Nothing else may be sent before registration succeeds, and the manager sends nothing to the
 proxy before it has registered. Each side records the other's `features` and uses only what was advertised.
@@ -175,4 +182,4 @@ keepalive on persistent connections are the cheaper first signals.
   sets keep-alive. A receiver must still serve frames until EOF.
 - `PING`, `LOG` and `SET_LOG_LEVEL` are optional for a port; the manager treats an unknown-method error to `PING` as
   life, and a port that never sends `LOG` is simply read from its pipes.
-- Not in the protocol: TLS (planned for remote peers), AES-GCM negotiation (ChaCha20-Poly1305 is the only cipher).
+- A port that implements only ChaCha20-Poly1305 omits `aead-aes256gcm` from its features and is never sent AES-GCM.

@@ -406,10 +406,10 @@ class IPCProtocol(BufferedProtocol):
         protocol = self.connector.PROTOCOL_VERSION[message.protocol_version]
         extra = {'remote_id': message.remote_id} if message.protocol_version >= 2 else {}
 
-        def pack(length, compressed, encrypted):
+        def pack(length, compressed, encrypted, aes_gcm):
             return protocol(length, message.method_name, message.request_id, self.connector.proxy_id,
                             self.connector.token, message.response_expected, keep_alive=keep_alive,
-                            compressed=compressed, encrypted=encrypted, **extra).pack()
+                            compressed=compressed, encrypted=encrypted, aes_gcm=aes_gcm, **extra).pack()
         return bytearray(self.connector.seal(remote, bytes(message.payload), pack))
 
     def connection_lost(self, exc):

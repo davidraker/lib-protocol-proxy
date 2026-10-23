@@ -74,7 +74,8 @@ class ProtocolProxy(IPCConnector, metaclass=abc.ABCMeta):
 
     # ---- liveness -------------------------------------------------------------------------------------------------
     #: Advertised in REGISTER_PEER so the manager knows what this proxy answers.
-    FEATURES: ClassVar[tuple[str, ...]] = ('ping', 'log', 'set_log_level', 'compress', 'aead-chacha20poly1305')
+    FEATURES: ClassVar[tuple[str, ...]] = ('ping', 'log', 'set_log_level', 'compress', 'aead-chacha20poly1305',
+                                           'aead-aes256gcm')
     MANAGER_WAIT_LOG_INTERVAL = 30.0
 
     def manager_linked(self) -> bool:
@@ -214,7 +215,8 @@ class ProtocolProxy(IPCConnector, metaclass=abc.ABCMeta):
         message = ProtocolProxyMessage(
             method_name='REGISTER_PEER',
             payload= json.dumps({'address': local_address, 'port':local_port, 'proxy_id': self.proxy_id.hex,
-                                 'token': self.token.hex, 'features': list(self.FEATURES)}).encode('utf8'),
+                                 'token': self.token.hex, 'features': list(self.FEATURES),
+                                 'cipher': self.cipher}).encode('utf8'),
             response_expected=True
         )
         return message

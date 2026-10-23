@@ -204,7 +204,8 @@ def test_real_proxy_launched_with_encryption_exchanges_only_encrypted_frames(pro
     tests_dir = str(Path(__file__).resolve().parent)
     monkeypatch.setenv('PYTHONPATH', os.pathsep.join(filter(None, [tests_dir, os.environ.get('PYTHONPATH')])))
     import dummy_proxies as dummies
-    manager = GeventProtocolProxyManager(proxy_class=dummies.AsyncioDummy, encrypt=True, heartbeat_interval=0.3)
+    manager = GeventProtocolProxyManager(proxy_class=dummies.AsyncioDummy, encrypt=True, heartbeat_interval=0.3,
+                                         cipher='aes-256-gcm')
     manager.start()
     loop = gevent.spawn(manager.select_loop)
     peer = None
@@ -219,6 +220,7 @@ def test_real_proxy_launched_with_encryption_exchanges_only_encrypted_frames(pro
             assert json.loads(reply) == {'level': 'WARNING'}
             _wait(lambda: any(r.channel == 'socket' for r in proxies_log), what='a LOG batch over the socket')
         assert opened.call_count >= 3 and all(call.args[0].encrypted for call in opened.call_args_list)
+        assert all(call.args[0].aes_gcm for call in opened.call_args_list)       # the proxy followed --cipher
         manager._cleanup_proxy_process(peer.process)
         assert peer.process.returncode == 0
     finally:

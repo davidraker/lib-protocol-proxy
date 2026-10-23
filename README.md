@@ -109,7 +109,12 @@ on every frame between the two, registration included, is ChaCha20-Poly1305: hea
 wire is a 12-byte random nonce, the ciphertext and the 16-byte tag (`data_length` counts those bytes), and the whole
 header, version word through `remote_id`, is the associated data, so the method name, request id, sender, remote and
 flags cannot be altered or replayed onto another message without detection. Compression, when it applies, happens
-before encryption. The mode is fixed per peer: a receiver refuses a clear-text frame from a peer it shares a key with
+before encryption. The AEAD is ChaCha20-Poly1305 by default or AES-256-GCM (header bit 4): each end encrypts with
+its configured `cipher` (`auto`, the default, picks AES-256-GCM when its CPU has AES instructions, else
+ChaCha20-Poly1305), falls back to ChaCha20-Poly1305 toward a peer that did not advertise `aead-aes256gcm`, and
+accepts either on receipt. The manager passes its choice to the proxies it encrypts with as `--cipher`, so both
+ends of a local pair agree; `get_proxy(..., cipher='chacha20-poly1305')` overrides it for one proxy, for example a
+remote one on a CPU without AES instructions. The mode is fixed per peer: a receiver refuses a clear-text frame from a peer it shares a key with
 and an encrypted frame from one it does not; the refused request fails (or the connection is dropped) and nothing
 else is affected. Peers advertise `aead-chacha20poly1305` in their features. Keys live for the proxy's lifetime; a
 relaunch gets a fresh one. TLS for remote peers is a separate, later step.

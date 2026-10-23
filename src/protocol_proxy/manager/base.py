@@ -91,6 +91,8 @@ class ProtocolProxyManager(IPCConnector, ABC):
             kwargs.setdefault('log_level', logging.getLevelName(self.proxy_logger(proxy_name).getEffectiveLevel()))
             if self.encrypt:
                 kwargs.setdefault('encrypt', True)      # the proxy must read the key the manager writes to stdin
+            if str2bool(kwargs.get('encrypt', False)):
+                kwargs.setdefault('cipher', self.cipher)    # one choice for both ends unless the caller says otherwise
             if self.tls_default:
                 kwargs.setdefault('ipc_tls', True)      # and the TLS material after it
             # Launched through the generic entry point so the proxy module is imported exactly once (see launch.main).
@@ -148,8 +150,10 @@ class ProtocolProxyManager(IPCConnector, ABC):
             proxy.socket_params = SocketParams(address=address, port=port)
             proxy.features = tuple(message.get('features') or ())
             proxy.mark_registered()
+            cipher = message.get('cipher')
             _log.info(f'PPM: Successfully registered peer: {proxy.proxy_id} @ {proxy.socket_params}'
-                      f' (features: {", ".join(proxy.features) or "none"})')
+                      f' (features: {", ".join(proxy.features) or "none"}'
+                      f'{f"; encrypts with {cipher}" if cipher and proxy.key else ""})')
             return json.dumps({'registered': True, 'features': list(self.FEATURES)}).encode('utf8')
         else:  # TODO: Is there any reasonable situation where this runs and returns false?
             _log.error(f'PPM: Failed to register peer: {proxy.proxy_id} with message: {message}.')
