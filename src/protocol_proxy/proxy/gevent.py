@@ -1,5 +1,6 @@
 import json
 import logging
+import os
 import signal
 
 from abc import ABC
@@ -128,7 +129,11 @@ class GeventProtocolProxy(GeventIPCConnector, ProtocolProxy, ABC):
             sleep(self.manager_watch_interval)
         if not self._stop:
             self._manager_lost = True
-            self.on_manager_lost()
+            try:
+                self.on_manager_lost()
+            except Exception:
+                _log.exception(f'{self.proxy_name}: stopping after the manager was lost raised; exiting.')
+                os._exit(1)
 
     def _on_terminate_signal(self):
         """SIGTERM is how the manager stops a proxy: stop gracefully so protocols get to flush their state. The
@@ -136,9 +141,13 @@ class GeventProtocolProxy(GeventIPCConnector, ProtocolProxy, ABC):
         watcher cancelled it would) and is cancelled when ``run`` finishes or ``stop`` is called from elsewhere."""
         if not self._stop:
             _log.info(f'{self.proxy_name}: received SIGTERM; stopping.')
+            self.arm_hard_exit('SIGTERM')
             self._in_signal_handler = True
             try:
                 self.stop()
+            except Exception:
+                _log.exception(f'{self.proxy_name}: stop() raised on SIGTERM; exiting.')
+                os._exit(1)
             finally:
                 self._in_signal_handler = False
 

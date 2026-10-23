@@ -3,6 +3,7 @@ import json
 import logging
 import os
 import sys
+import threading
 import time
 
 from datetime import datetime, timezone
@@ -165,10 +166,32 @@ class ProtocolProxy(IPCConnector, metaclass=abc.ABCMeta):
         """Whether the process that launched this proxy is still its parent (an orphan is re-parented)."""
         return os.getppid() == self._parent_pid
 
+    #: Seconds a proxy gets to stop after its manager is gone or SIGTERM arrived; then the process exits regardless.
+    HARD_EXIT_GRACE = 15.0
+
+    def arm_hard_exit(self, reason: str):
+        """Guarantee the process ends: a plain thread (independent of gevent or asyncio) exits it after
+        HARD_EXIT_GRACE seconds if the orderly stop has not. A proxy must never outlive its manager because its own
+        shutdown raised or hung; two did on 2026-10-23 and spammed the next platform's reused ports for hours."""
+        if getattr(self, '_hard_exit_armed', False):
+            return
+        self._hard_exit_armed = True
+
+        def hard_exit():
+            _log.error(f'{self.proxy_name}: still running {self.HARD_EXIT_GRACE:g} s after {reason}; exiting now.')
+            try:
+                logging.shutdown()
+            finally:
+                os._exit(1)
+        timer = threading.Timer(self.HARD_EXIT_GRACE, hard_exit)
+        timer.daemon = True
+        timer.start()
+
     def on_manager_lost(self):
         """Called once, from the run loop, when the manager process has gone. The default logs and stops the proxy;
         a protocol may override this to flush state first (and should still call super or stop)."""
         _log.warning(f'{self.proxy_name}: the manager process ({self._parent_pid}) is gone. Stopping.')
+        self.arm_hard_exit('the manager was lost')
         return self.stop()      # a coroutine for asyncio proxies; the watchdog awaits it
 
 

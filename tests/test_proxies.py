@@ -222,3 +222,46 @@ def test_registration_reply_from_a_current_manager_records_its_features():
     assert p.registration_accepted(manager_peer, b'garbage') is False
     p.inbound_server_socket = mock.Mock(getsockname=lambda: ('127.0.0.1', 5))
     assert json.loads(p._get_registration_message().payload)['features'] == list(ProtocolProxy.FEATURES)
+
+
+def test_a_failing_stop_still_ends_the_process(monkeypatch):
+    """A proxy whose stop() raises on SIGTERM or when the manager is lost exits instead of lingering (two did, and
+    spammed the ports a later platform reused). The hard-exit timer is armed before stop() is tried."""
+    exits, timers = [], []
+    monkeypatch.setattr('protocol_proxy.proxy.gevent.os._exit', lambda code: exits.append(code))
+    monkeypatch.setattr('protocol_proxy.proxy.base.os._exit', lambda code: exits.append(code))
+
+    class FakeTimer:
+        def __init__(self, interval, function):
+            timers.append((interval, function)); self.daemon = False
+        def start(self): pass
+    monkeypatch.setattr('protocol_proxy.proxy.base.threading.Timer', FakeTimer)
+    p = gevent_proxy()
+    p.stop = mock.Mock(side_effect=RuntimeError('flush failed'))
+    p._on_terminate_signal()
+    assert exits == [1] and timers and timers[0][0] == p.HARD_EXIT_GRACE
+    exits.clear()
+    q = gevent_proxy()
+    q.stop = mock.Mock(side_effect=RuntimeError('flush failed'))
+    with mock.patch.object(q, 'manager_alive', return_value=False):
+        q._watch_manager()
+    assert exits == [1]
+    # The timer itself exits the process when it fires.
+    timers[-1][1]()
+    assert exits[-1] == 1
+
+
+def test_asyncio_failing_stop_on_sigterm_exits():
+    async def main():
+        exits = []
+        p = AsyncioDummy(proxy_id=uuid4(), token=uuid4(), manager_address='127.0.0.1', manager_port=1,
+                         manager_id=uuid4(), manager_token=uuid4(), inbound_params=SocketParams('127.0.0.1', 0))
+        with mock.patch('protocol_proxy.proxy.asyncio.os._exit', lambda code: exits.append(code)), \
+             mock.patch('protocol_proxy.proxy.base.threading.Timer') as timer:
+            async def failing_stop():
+                raise RuntimeError('flush failed')
+            p.stop = failing_stop
+            p._on_terminate_signal(signal.SIGTERM)
+            await asyncio.sleep(0.05)
+        assert exits == [1] and timer.called
+    asyncio.run(main())

@@ -1,6 +1,7 @@
 import asyncio
 import json
 import logging
+import os
 import signal
 
 from abc import ABC
@@ -80,9 +81,13 @@ class AsyncioProtocolProxy(AsyncioIPCConnector, ProtocolProxy, ABC):
         while self.manager_alive():
             await asyncio.sleep(self.manager_watch_interval)
         self._manager_lost = True
-        result = self.on_manager_lost()
-        if asyncio.iscoroutine(result):
-            await result
+        try:
+            result = self.on_manager_lost()
+            if asyncio.iscoroutine(result):
+                await result
+        except Exception:
+            _log.exception(f'{self.proxy_name}: stopping after the manager was lost raised; exiting.')
+            os._exit(1)
 
     def _start_log_flusher(self):
         self._log_flusher = self.loop.create_task(self._flush_logs_loop())
@@ -126,7 +131,13 @@ class AsyncioProtocolProxy(AsyncioIPCConnector, ProtocolProxy, ABC):
         if self._stopping:
             return
         _log.info(f'{self.proxy_name}: received {signal.Signals(signum).name}; stopping.')
-        self.loop.create_task(self.stop())
+        self.arm_hard_exit(signal.Signals(signum).name)
+
+        def stopped(task: asyncio.Task):
+            if not task.cancelled() and task.exception() is not None:
+                _log.error(f'{self.proxy_name}: stop() raised on {signal.Signals(signum).name}: {task.exception()!r}; exiting.')
+                os._exit(1)
+        self.loop.create_task(self.stop()).add_done_callback(stopped)
 
     async def start(self):
         """Create the inbound server, register with the manager, then serve until stopped, terminated or orphaned."""
