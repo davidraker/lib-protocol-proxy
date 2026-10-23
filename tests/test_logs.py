@@ -130,6 +130,9 @@ def test_remove_library_handlers_strips_and_names_them(caplog):
         assert remove_library_handlers() == ['test_logs.somelib.sub']
     assert lib.handlers == [] and 'test_logs.somelib.sub' in caplog.text
     assert remove_library_handlers() == []
+    quiet = logging.getLogger('test_logs.quietlib')
+    quiet.addHandler(logging.NullHandler())                       # what pymodbus does at import: left alone
+    assert remove_library_handlers() == [] and len(quiet.handlers) == 1
 
 
 CHILD = r'''

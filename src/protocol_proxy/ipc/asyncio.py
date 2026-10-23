@@ -220,6 +220,7 @@ class AsyncioIPCConnector(IPCConnector):
         if self.inbound_server is not None:
             self.inbound_server.close()
             await self.inbound_server.wait_closed()
+        await asyncio.sleep(0)      # let the transports' connection_lost callbacks run before the loop goes away
 
 
 class IPCProtocol(BufferedProtocol):

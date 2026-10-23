@@ -313,8 +313,13 @@ def remove_library_handlers() -> list[str]:
     warning). Returns the names of the loggers that had handlers; one WARNING names them."""
     stripped = []
     for name, logger in list(logging.Logger.manager.loggerDict.items()):
-        if isinstance(logger, logging.Logger) and logger.handlers:
-            logger.handlers.clear()
+        if not isinstance(logger, logging.Logger):
+            continue
+        # A NullHandler emits nothing (it is how a library avoids the "no handlers" warning): not a second channel.
+        real = [h for h in logger.handlers if not isinstance(h, logging.NullHandler)]
+        if real:
+            for handler in real:
+                logger.removeHandler(handler)
             stripped.append(name)
     if stripped:
         _log.warning(f'Removed handlers a library installed on logger(s) {sorted(stripped)}; proxies log through'
