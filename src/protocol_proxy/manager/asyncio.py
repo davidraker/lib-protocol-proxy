@@ -49,6 +49,16 @@ class AsyncioProtocolProxyManager(ProtocolProxyManager, AsyncioIPCConnector, ABC
         if lost and self.peers.get(peer.proxy_id) is peer:
             self._lose_peer(peer, f'missed {peer.missed} heartbeats')
 
+    async def _dial_until_registered(self, peer: AsyncioProtocolProxyPeer, interval: float = 1.0):
+        while self.peers.get(peer.proxy_id) is peer and peer.socket_params is None:
+            try:
+                result = await self.send(peer, self.ping_message())
+                if result is not False:
+                    await asyncio.wait_for(result, self.heartbeat_timeout)
+            except Exception as e:
+                _log.debug(f'PPM: {peer.name} not reachable yet at {peer.dial_params}: {e}')
+            await asyncio.sleep(interval)
+
     def _lose_peer(self, peer: ProtocolProxyPeer, reason: str):
         """Forget a peer, stop its process if it still runs, and tell the peer-lost listeners."""
         if self.peers.get(peer.proxy_id) is peer:
@@ -98,8 +108,12 @@ class AsyncioProtocolProxyManager(ProtocolProxyManager, AsyncioIPCConnector, ABC
             await proxy_process.stdin.drain()
             proxy_process.stdin.close()
             proxy_process.stdin = None
-            self.peers[proxy_id] = AsyncioProtocolProxyPeer(process=proxy_process, proxy_id=proxy_id, token=peer_token,
-                                                            name=proxy_name, persistent=self.peer_policy(kwargs), key=key)
+            dial = self.dial_target(kwargs)
+            self.peers[proxy_id] = peer = AsyncioProtocolProxyPeer(
+                process=proxy_process, proxy_id=proxy_id, token=peer_token, name=proxy_name,
+                persistent=True if dial else self.peer_policy(kwargs), dial_params=dial, key=key)
+            if dial is not None:
+                self.loop.create_task(self._dial_until_registered(peer))
             self._setup_exit(proxy_process)
             atexit.register(self.finalize_process, proxy_process)
             self.start_heartbeat()

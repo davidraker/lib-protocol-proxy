@@ -22,8 +22,8 @@ class AsyncioProtocolProxy(AsyncioIPCConnector, ProtocolProxy, ABC):
                                                    manager_id=manager_id, proxy_id=proxy_id,
                                                    registration_retry_delay=registration_retry_delay,
                                                    token=token, proxy_name=proxy_name, **kwargs)
-        self.peers[manager_id] = AsyncioProtocolProxyPeer(proxy_id=manager_id, socket_params=self.manager_params,
-                                                          token=manager_token, key=self.manager_key)
+        self.peers[manager_id] = AsyncioProtocolProxyPeer(proxy_id=manager_id, token=manager_token, key=self.manager_key,
+                                                          socket_params=None if self.manager_dials else self.manager_params)
         self.registration_attempts = registration_attempts
         self.registration_timeout = registration_timeout
         self.registered = False
@@ -38,7 +38,19 @@ class AsyncioProtocolProxy(AsyncioIPCConnector, ProtocolProxy, ABC):
         sockname = self.inbound_server.sockets[0].getsockname()
         return SocketParams(sockname[0], sockname[1])
 
+    async def _wait_for_manager(self):
+        waited = 0.0
+        while not self._stopping and not self.manager_linked():
+            if waited % self.MANAGER_WAIT_LOG_INTERVAL < 0.1:
+                _log.info(f'{self.proxy_name}: waiting for the manager to connect to {self.inbound_params}.')
+            await asyncio.sleep(0.1)
+            waited += 0.1
+
     async def send_registration(self, remote: AsyncioProtocolProxyPeer) -> bool:
+        if self.manager_dials:
+            await self._wait_for_manager()
+            if self._stopping:
+                return False
         for attempt in range(1, self.registration_attempts + 1):
             try:
                 message = self._get_registration_message()

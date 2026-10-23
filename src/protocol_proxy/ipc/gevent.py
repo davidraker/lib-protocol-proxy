@@ -164,18 +164,23 @@ class GeventIPCConnector(IPCConnector):
             return False
         try:
             with remote.ready:
-                params = remote.socket_params
-                address = None
-                if params is not None and getattr(params, 'address', None) and getattr(params, 'port', None):
-                    address = (params.address, params.port)
-                link = remote.connection if remote.connection is not None and remote.connection.alive else None
-                if address is None and link is None:
-                    _log.error(f"{self.proxy_name}: Refusing to send to {remote.proxy_id}: no open connection and"
-                               f" its SocketParams are invalid: {params}")
-                    return False
+                return self._send(remote, message)
         except (OSError, Exception) as e:
             _log.warning(f"{self.proxy_name}: Unexpected error preparing to send to"
                          f" {getattr(remote, 'socket_params', remote)}: {e}")
+            return False
+
+    def _send(self, remote: ProtocolProxyPeer, message: ProtocolProxyMessage) -> bool | AsyncResult:
+        """``send`` without the peer's ``ready`` lock: for the manager's greeting of a proxy that is still registering
+        (the registration waiter holds that lock until the proxy has registered)."""
+        params = remote.dial_params or remote.socket_params
+        address = None
+        if params is not None and getattr(params, 'address', None) and getattr(params, 'port', None):
+            address = (params.address, params.port)
+        link = remote.connection if remote.connection is not None and remote.connection.alive else None
+        if address is None and link is None:
+            _log.error(f"{self.proxy_name}: Refusing to send to {remote.proxy_id}: no open connection and"
+                       f" its SocketParams are invalid: {params}")
             return False
         if message.request_id is None:
             message.request_id = self.request_id_for(message.protocol_version)

@@ -52,6 +52,9 @@ def proxy_command_parser(parser: ArgumentParser = None):
                         help='Address of the inbound socket from the Proxy Manager')
     parser.add_argument('--inbound-port', type=int, default=None,
                         help='Port of the inbound socket from the Proxy Manager. Chosen automatically if omitted.')
+    parser.add_argument('--manager-dials', type=str2bool, default=False,
+                        help='Do not dial the manager: wait for it to connect to this proxy\'s listener (--inbound-port)'
+                             ' and register over that connection. For a proxy that cannot reach the manager\'s address.')
     parser.add_argument('--persistent', type=str2bool, default=False,
                         help='Keep one connection open to the manager for every frame in both directions, instead of a'
                              ' connection per message. The manager passes the same policy it applies to this proxy.')

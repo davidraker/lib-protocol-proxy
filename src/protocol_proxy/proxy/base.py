@@ -33,7 +33,7 @@ class ProtocolProxy(IPCConnector, metaclass=abc.ABCMeta):
 
     def __init__(self, *, manager_address: str, manager_port: int, manager_id: UUID,
                  registration_retry_delay: float = 20.0, manager_watch_interval: float = 1.0,
-                 socket_logging: bool = True, key: bytes | None = None, **kwargs):
+                 socket_logging: bool = True, key: bytes | None = None, manager_dials: bool = False, **kwargs):
         """NOTE: Proxy implementations MUST:
             1. Subclass a multitasking subclass of IPCConnector (gevent, asyncio, etc.)
             2. Subclass this "ProtocolProxy" class.
@@ -49,6 +49,10 @@ class ProtocolProxy(IPCConnector, metaclass=abc.ABCMeta):
         if self.encrypt and key is None:
             raise ValueError(f'{self.proxy_name}: --encrypt is set but no key was provided on stdin.')
         self.registration_retry_delay: float = registration_retry_delay
+        # A proxy that cannot reach the manager's address (behind NAT, or started where the manager is not reachable)
+        # waits for the manager to connect to its listener instead and registers over that connection; the manager
+        # authenticates itself with the id and token this proxy was launched with, as on any frame.
+        self.manager_dials: bool = manager_dials
         self.manager_params = SocketParams(manager_address, manager_port)
         self.manager = manager_id
         # The manager is the parent process. If it dies, this proxy is an orphan: it would hold its listeners and
@@ -68,6 +72,12 @@ class ProtocolProxy(IPCConnector, metaclass=abc.ABCMeta):
     # ---- liveness -------------------------------------------------------------------------------------------------
     #: Advertised in REGISTER_PEER so the manager knows what this proxy answers.
     FEATURES: ClassVar[tuple[str, ...]] = ('ping', 'log', 'set_log_level', 'compress', 'aead-chacha20poly1305')
+    MANAGER_WAIT_LOG_INTERVAL = 30.0
+
+    def manager_linked(self) -> bool:
+        """Whether the manager has an open persistent connection to this proxy (adopted or dialled)."""
+        peer = self.peers.get(self.manager)
+        return peer is not None and peer.connection is not None and peer.connection.alive
 
     def registration_accepted(self, remote: ProtocolProxyPeer, manager_response) -> bool:
         """Read the manager's REGISTER_PEER reply: ``{"registered": true, "features": [...]}`` from a current manager

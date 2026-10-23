@@ -75,9 +75,16 @@ SSH tunnel): the proxy registers over its persistent connection and every reques
 one. Persistent sockets have TCP keepalive enabled so a vanished peer is noticed within about a minute; the
 heartbeat planned for liveness will shorten that.
 
+A proxy that cannot reach the manager's address (behind NAT, or started where that address is not routable) is
+launched with `get_proxy(key, manager_dials=True, inbound_address=..., inbound_port=..., ...)`: it listens on that
+address and does not dial; the manager dials it (at `dial=(address, port)` when that differs from the listener), sends
+`PING` on a persistent connection until the proxy registers over it, and from then on every request and push uses that
+one connection. The proxy attaches only a connection whose frames authenticate as the manager it was launched for (id
+on the command line, token on stdin), so nothing else can present itself as its manager.
+
 To run a proxy persistently, pass `persistent=True` to `get_proxy` (it reaches the proxy as `--persistent True`, so
-both ends apply the same policy). Local proxies stay per-message by default until persistence has run in the
-real-platform matrix for a while.
+both ends apply the same policy). The driver interfaces default to persistent since 2026-10-22 (`persistent_connection`
+per device turns it off).
 
 ## Encryption
 

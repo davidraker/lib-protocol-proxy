@@ -67,6 +67,19 @@ class GeventProtocolProxyManager(ProtocolProxyManager, GeventIPCConnector, ABC):
                 # The peer itself is fine; only this caller's follow-up failed. Keep the peer for everyone else.
                 _log.error(f"Error running post-registration function for peer {peer.proxy_id}: {e}")
 
+    def _dial_until_registered(self, peer: GeventProtocolProxyPeer, interval: float = 1.0):
+        """For a proxy that cannot dial in: open the persistent connection to it and PING until it has registered
+        over that connection (it adopts the connection once the frame authenticates as this manager)."""
+        while self.peers.get(peer.proxy_id) is peer and not peer.registered.is_set():
+            try:
+                result = self._send(peer, self.ping_message())     # not send(): the registration waiter holds ready
+                if result is not False:
+                    result.get(timeout=self.heartbeat_timeout)
+                peer.registered.wait(interval)
+            except Exception as e:
+                _log.debug(f'PPM: {peer.name} not reachable yet at {peer.dial_params}: {e}')
+                sleep(interval)
+
     def _lose_peer(self, peer: ProtocolProxyPeer, reason: str):
         """Forget a peer and stop its process if it is still running, then tell the peer-lost listeners."""
         if self.peers.get(peer.proxy_id) is peer:
@@ -94,8 +107,9 @@ class GeventProtocolProxyManager(ProtocolProxyManager, GeventIPCConnector, ABC):
         if command:
             # The peer is registered before the process is launched: launching yields to other greenlets, and a
             # concurrent get_proxy for the same key must find this peer rather than launch a second process.
+            dial = self.dial_target(kwargs)
             peer = GeventProtocolProxyPeer(process=None, proxy_id=proxy_id, token=uuid4(), name=proxy_name,
-                                           persistent=self.peer_policy(kwargs),
+                                           persistent=True if dial else self.peer_policy(kwargs), dial_params=dial,
                                            key=self.new_key() if self.peer_encrypted(kwargs) else None)
             self.peers[proxy_id] = peer
             try:
@@ -120,6 +134,8 @@ class GeventProtocolProxyManager(ProtocolProxyManager, GeventIPCConnector, ABC):
             proxy_process.stdin = open(os.devnull)
             atexit.register(self._cleanup_proxy_process, proxy_process)
             spawn(self._watch_proxy_process, proxy_id, peer)
+            if dial is not None:
+                spawn(self._dial_until_registered, peer)
             self.start_heartbeat()
             # Do NOT send to the proxy until it has registered and socket_params is set!
             _log.info(f"PPM: Proxy {proxy_id} created, waiting for registration before sending.")

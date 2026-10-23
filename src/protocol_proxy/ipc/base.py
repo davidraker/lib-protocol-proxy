@@ -57,6 +57,9 @@ class ProtocolProxyPeer(ABC):
     ready: Any
     token: UUID
     socket_params: SocketParams = None
+    #: Where this side dials the peer when that differs from what the peer advertised (a proxy that cannot be
+    #: reached at its own address, or that the manager must dial because the proxy cannot dial the manager).
+    dial_params: SocketParams = None
     #: The peer's proxy name (what the manager launched it as); the manager logs its records under it.
     name: str | None = None
     #: Connection lifetime toward this peer: True keeps one connection open for every frame in both directions,

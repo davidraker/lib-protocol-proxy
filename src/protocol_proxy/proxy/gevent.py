@@ -31,8 +31,9 @@ class GeventProtocolProxy(GeventIPCConnector, ProtocolProxy, ABC):
                                                   manager_address=manager_address, manager_port=manager_port,
                                                   manager_id=manager_id,
                                                   registration_retry_delay=registration_retry_delay, **kwargs)
-        self.peers[manager_id] = GeventProtocolProxyPeer(proxy_id=manager_id, socket_params=self.manager_params,
-                                                         token=manager_token, key=self.manager_key)
+        # With manager_dials the manager peer has no address: every send uses the connection the manager opened.
+        self.peers[manager_id] = GeventProtocolProxyPeer(proxy_id=manager_id, token=manager_token, key=self.manager_key,
+                                                         socket_params=None if self.manager_dials else self.manager_params)
         self.registration_attempts = registration_attempts
         self.registration_timeout = registration_timeout
         self.registered = False
@@ -44,7 +45,20 @@ class GeventProtocolProxy(GeventIPCConnector, ProtocolProxy, ABC):
             raise RuntimeError(f'{self.proxy_name}: start() must be called before registering with the manager.')
         return SocketParams(*self.inbound_server_socket.getsockname()[:2])
 
+    def _wait_for_manager(self):
+        """Block until the manager has connected (manager_dials mode); logs every MANAGER_WAIT_LOG_INTERVAL seconds."""
+        waited = 0.0
+        while not self._stop and not self.manager_linked():
+            if waited % self.MANAGER_WAIT_LOG_INTERVAL < 0.1:
+                _log.info(f'{self.proxy_name}: waiting for the manager to connect to {self.inbound_params}.')
+            sleep(0.1)
+            waited += 0.1
+
     def send_registration(self, remote: GeventProtocolProxyPeer) -> bool:
+        if self.manager_dials:
+            self._wait_for_manager()
+            if self._stop:
+                return False
         for attempt in range(1, self.registration_attempts + 1):
             try:
                 message = self._get_registration_message()

@@ -28,6 +28,11 @@ Exit code 0 after a clean stop (SIGTERM from the manager, manager gone, or a nor
 terminates the process with SIGTERM when it stops, kills it after 5 s, and relaunches it on the next request after an
 exit. The proxy watches its parent PID (every 1 s) and stops when re-parented.
 
+**Manager-initiated registration (2026-10-22).** A proxy launched with `--manager-dials true` does not dial the
+manager: it listens on `--inbound-address:--inbound-port` and waits. The manager opens a persistent connection to it
+and sends `PING` until the proxy registers over that connection (§7); the proxy adopts the connection only when its
+frames authenticate as the manager (sender id and token). Everything afterwards travels on that connection.
+
 ## 2. Transport
 
 TCP on `AF_INET`. Both ends listen: the manager on `--manager-address:--manager-port`, the proxy on

@@ -65,7 +65,7 @@ class AsyncioIPCConnector(IPCConnector):
         if not isinstance(remote, ProtocolProxyPeer):
             _log.error(f'{self.proxy_name}: send() requires a ProtocolProxyPeer, got {type(remote).__name__}: {remote}')
             return False
-        params = remote.socket_params
+        params = remote.dial_params or remote.socket_params
         address = None
         if params is not None and getattr(params, 'address', None) and getattr(params, 'port', None):
             address = (params.address, params.port)

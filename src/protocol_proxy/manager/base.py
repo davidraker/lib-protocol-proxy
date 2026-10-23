@@ -77,7 +77,7 @@ class ProtocolProxyManager(IPCConnector, ABC):
         if proxy_id not in self.peers:
             #_log.debug(f'@@@@@@@@@ PROXY_ID IS NOT IN PEERS. SETTING UP COMMAND.')
             module, func = self.proxy_class.__module__, self.proxy_class.__name__
-            kwargs = {k: v for k, v in kwargs.items() if k != 'manager_callbacks' and v is not None}
+            kwargs = {k: v for k, v in kwargs.items() if k not in self.MANAGER_ONLY_OPTIONS and v is not None}
             # The proxy logs at the level this manager would handle its records at, unless the caller chose one.
             kwargs.setdefault('log_level', logging.getLevelName(self.proxy_logger(proxy_name).getEffectiveLevel()))
             if self.encrypt:
@@ -260,6 +260,23 @@ class ProtocolProxyManager(IPCConnector, ABC):
         to the proxy as ``--encrypt``), else this manager's own ``encrypt`` setting."""
         value = kwargs.get('encrypt')
         return self.encrypt if value is None else str2bool(value)
+
+    #: get_proxy kwargs the manager consumes itself; everything else travels to the proxy as ``--name value``.
+    MANAGER_ONLY_OPTIONS = frozenset({'manager_callbacks', 'dial'})
+
+    @staticmethod
+    def dial_target(kwargs: dict) -> SocketParams | None:
+        """Where the manager must dial a proxy launched with ``manager_dials=True``: the ``dial`` kwarg
+        ``(address, port)``, else the proxy's ``inbound_address``/``inbound_port`` launch options (which the proxy
+        listens on). None for a proxy that dials in itself."""
+        if not str2bool(kwargs.get('manager_dials', False)):
+            return None
+        if (dial := kwargs.get('dial')) is not None:
+            return SocketParams(*dial)
+        port = kwargs.get('inbound_port')
+        if port is None:
+            raise ValueError('manager_dials=True needs the proxy\'s inbound_port (and inbound_address) or a dial=(address, port)')
+        return SocketParams(kwargs.get('inbound_address') or 'localhost', int(port))
 
     @staticmethod
     def peer_policy(kwargs: dict) -> bool | None:
