@@ -33,6 +33,7 @@ class GeventProtocolProxy(GeventIPCConnector, ProtocolProxy, ABC):
                                                   registration_retry_delay=registration_retry_delay, **kwargs)
         # With manager_dials the manager peer has no address: every send uses the connection the manager opened.
         self.peers[manager_id] = GeventProtocolProxyPeer(proxy_id=manager_id, token=manager_token, key=self.manager_key,
+                                                         tls=self.manager_tls,
                                                          socket_params=None if self.manager_dials else self.manager_params)
         self.registration_attempts = registration_attempts
         self.registration_timeout = registration_timeout
@@ -117,7 +118,7 @@ class GeventProtocolProxy(GeventIPCConnector, ProtocolProxy, ABC):
 
     def stop(self):
         self.stop_socket_logging()
-        if self._signal_watcher is not None:
+        if self._signal_watcher is not None and not getattr(self, '_in_signal_handler', False):
             self._signal_watcher.cancel()
             self._signal_watcher = None
         super(GeventProtocolProxy, self).stop()
@@ -130,10 +131,16 @@ class GeventProtocolProxy(GeventIPCConnector, ProtocolProxy, ABC):
             self.on_manager_lost()
 
     def _on_terminate_signal(self):
-        """SIGTERM is how the manager stops a proxy: stop gracefully so protocols get to flush their state."""
+        """SIGTERM is how the manager stops a proxy: stop gracefully so protocols get to flush their state. The
+        watcher stays armed while stopping (a second SIGTERM during shutdown must not kill the process; with the
+        watcher cancelled it would) and is cancelled when ``run`` finishes or ``stop`` is called from elsewhere."""
         if not self._stop:
             _log.info(f'{self.proxy_name}: received SIGTERM; stopping.')
-            self.stop()
+            self._in_signal_handler = True
+            try:
+                self.stop()
+            finally:
+                self._in_signal_handler = False
 
     def start(self, *_, **__) -> list[Greenlet]:
         """Create the inbound socket, then start the accept loop, registration, main loop and manager watchdog."""
@@ -153,4 +160,7 @@ class GeventProtocolProxy(GeventIPCConnector, ProtocolProxy, ABC):
             joinall(self.start(), raise_error=True)
         finally:
             self.stop()
+            if self._signal_watcher is not None:        # stop() ran from the signal handler and kept it armed
+                self._signal_watcher.cancel()
+                self._signal_watcher = None
         return 0 if self.registered else 1

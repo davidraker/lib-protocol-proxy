@@ -9,6 +9,7 @@ from uuid import UUID
 
 from ..ipc import SocketParams
 from ..logs import JsonLineFormatter, configure_logging    # noqa: F401  (re-exported; tests patch configure_logging)
+from ..tls import TlsMaterial
 
 _log = logging.getLogger(__name__)
 
@@ -52,6 +53,9 @@ def proxy_command_parser(parser: ArgumentParser = None):
                         help='Address of the inbound socket from the Proxy Manager')
     parser.add_argument('--inbound-port', type=int, default=None,
                         help='Port of the inbound socket from the Proxy Manager. Chosen automatically if omitted.')
+    parser.add_argument('--ipc-tls', type=str2bool, default=False,
+                        help='Every IPC connection with the manager is TLS, with the certificate, key and CA the manager'
+                             ' writes to stdin after the tokens (and key). Both ends verify each other.')
     parser.add_argument('--manager-dials', type=str2bool, default=False,
                         help='Do not dial the manager: wait for it to connect to this proxy\'s listener (--inbound-port)'
                              ' and register over that connection. For a proxy that cannot reach the manager\'s address.')
@@ -73,21 +77,30 @@ def proxy_command_parser(parser: ArgumentParser = None):
 KEY_HEX_LENGTH = 64
 
 
-def _read_tokens(encrypt: bool = False) -> tuple[UUID, UUID, bytes | None]:
-    """The manager writes the proxy token followed by its own token, as hex, to the proxy's stdin, and after them the
-    32-byte AEAD key (hex) when the proxy is launched with ``--encrypt``. Nothing secret is on the command line."""
+def _read_tokens(encrypt: bool = False, ipc_tls: bool = False) -> tuple:
+    """The manager writes the proxy token followed by its own token, as hex, to the proxy's stdin, after them the
+    32-byte AEAD key (hex) when the proxy is launched with ``--encrypt``, and then one JSON line of TLS material
+    (``{"ca", "cert", "key"}`` PEM) when launched with ``--ipc-tls``. Nothing secret is on the command line.
+    Returns ``(proxy_token, manager_token, key, tls_material)``."""
     data = sys.stdin.buffer.read(2 * TOKEN_HEX_LENGTH)
     if len(data) != 2 * TOKEN_HEX_LENGTH:
         raise ValueError(f'Expected {2 * TOKEN_HEX_LENGTH} hex characters (proxy token + manager token) on stdin,'
                          f' got {len(data)} bytes. Proxies are meant to be launched by a ProtocolProxyManager.')
     tokens = UUID(hex=data[:TOKEN_HEX_LENGTH].decode('utf8')), UUID(hex=data[TOKEN_HEX_LENGTH:].decode('utf8'))
-    if not encrypt:
-        return *tokens, None
-    key_hex = sys.stdin.buffer.read(KEY_HEX_LENGTH)
-    if len(key_hex) != KEY_HEX_LENGTH:
-        raise ValueError(f'--encrypt is set but no {KEY_HEX_LENGTH // 2}-byte key followed the tokens on stdin'
-                         f' (got {len(key_hex)} bytes).')
-    return *tokens, bytes.fromhex(key_hex.decode('utf8'))
+    key = None
+    if encrypt:
+        key_hex = sys.stdin.buffer.read(KEY_HEX_LENGTH)
+        if len(key_hex) != KEY_HEX_LENGTH:
+            raise ValueError(f'--encrypt is set but no {KEY_HEX_LENGTH // 2}-byte key followed the tokens on stdin'
+                             f' (got {len(key_hex)} bytes).')
+        key = bytes.fromhex(key_hex.decode('utf8'))
+    material = None
+    if ipc_tls:
+        line = sys.stdin.buffer.readline()
+        if not line.strip():
+            raise ValueError('--ipc-tls is set but no TLS material (one JSON line) followed on stdin.')
+        material = TlsMaterial.from_line(line)
+    return *tokens, key, material
 
 
 def launch(launcher_func: Callable, argv: list[str] | None = None) -> int:
@@ -106,11 +119,11 @@ def launch(launcher_func: Callable, argv: list[str] | None = None) -> int:
     opts['inbound_params'] = SocketParams(inbound_address, inbound_port) if inbound_port else None
     _log.info(f'Launching Proxy with parameters: {redact(opts)}')
     try:
-        proxy_token, manager_token, key = _read_tokens(bool(opts.get('encrypt')))
+        proxy_token, manager_token, key, material = _read_tokens(bool(opts.get('encrypt')), bool(opts.pop('ipc_tls', False)))
         if iscoroutinefunction(proxy_runner):
-            result = run(proxy_runner(token=proxy_token, manager_token=manager_token, key=key, **opts))
+            result = run(proxy_runner(token=proxy_token, manager_token=manager_token, key=key, ipc_tls=material, **opts))
         else:
-            result = proxy_runner(token=proxy_token, manager_token=manager_token, key=key, **opts)
+            result = proxy_runner(token=proxy_token, manager_token=manager_token, key=key, ipc_tls=material, **opts)
     except KeyboardInterrupt:
         _log.info('Proxy Launch: interrupted.')
         return 0

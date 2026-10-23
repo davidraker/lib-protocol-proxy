@@ -13,6 +13,7 @@ from typing import Any, Awaitable, Callable, ClassVar, NamedTuple
 from uuid import UUID
 
 from . import callback, HeadersV1, HeadersV2, ProtocolHeaders
+from .. import tls as _tls
 
 _log = logging.getLogger(__name__)
 
@@ -73,6 +74,8 @@ class ProtocolProxyPeer(ABC):
     connection: Any = None
     #: What the peer advertised in REGISTER_PEER (``ping``, ``log``, ``set_log_level``, ...).
     features: tuple = ()
+    #: Connections with this peer are TLS (mutually authenticated against the manager's CA, see protocol_proxy.tls).
+    tls: bool = False
     #: The 32-byte AEAD key shared with this peer, or None for clear text. Fixed for the peer's lifetime: every frame
     #: between two peers that share a key is encrypted, and a clear-text frame from such a peer is refused.
     key: bytes | None = None
@@ -105,7 +108,8 @@ class IPCConnector(metaclass=ABCMeta):
     def __init__(self, *, proxy_id: UUID, token: UUID, proxy_name: str = None, inbound_params: SocketParams = None,
                  chunk_size: int = 1024, encrypt: bool = False, min_port: int = 22801, max_port: int = 22899,
                  persistent: bool = False, persistent_max_frame: int | None = PERSISTENT_MAX_FRAME,
-                 compress_threshold: int | None = COMPRESS_THRESHOLD, **kwargs):
+                 compress_threshold: int | None = COMPRESS_THRESHOLD, tls_material: '_tls.TlsMaterial | None' = None,
+                 **kwargs):
         """ Handles socket communication between ProtocolProxy and ProtocolProxyManager.
 
         Connection lifetime is a policy per peer (``ProtocolProxyPeer.persistent``), defaulting to ``persistent``
@@ -122,6 +126,10 @@ class IPCConnector(metaclass=ABCMeta):
         self.persistent: bool = persistent
         self.persistent_max_frame: int | None = persistent_max_frame
         self.compress_threshold: int | None = compress_threshold
+        # Our certificate, key and CA for TLS connections (None: this end has no TLS identity). Contexts are built
+        # lazily; a flavour may use a cooperative SSLContext class (gevent).
+        self.tls_material: _tls.TlsMaterial | None = tls_material
+        self._tls_contexts: dict[str, Any] = {}
         self.inbound_params = inbound_params
         self.min_port: int = min_port
         self.max_port: int = max_port
@@ -224,6 +232,33 @@ class IPCConnector(metaclass=ABCMeta):
         elif key is not None:
             raise PermissionError(f'clear-text {headers.method_name} from {headers.sender_id}, who must encrypt')
         return self.decode_payload(headers, payload)
+
+    SSL_CONTEXT_CLASS = None        # a flavour may substitute a cooperative ssl.SSLContext subclass
+
+    def tls_context(self, purpose: str):
+        """The ``server`` or ``client`` TLS context for this end, or None without TLS material."""
+        if self.tls_material is None:
+            return None
+        if purpose not in self._tls_contexts:
+            factory = _tls.server_context if purpose == 'server' else _tls.client_context
+            kwargs = {'context_class': self.SSL_CONTEXT_CLASS} if self.SSL_CONTEXT_CLASS is not None else {}
+            self._tls_contexts[purpose] = factory(self.tls_material, **kwargs)
+        return self._tls_contexts[purpose]
+
+    def frame_identity_ok(self, headers: ProtocolHeaders, tls_peer: str | None) -> bool:
+        """A frame is accepted only if its transport identity matches its claimed identity: over TLS the sender id must
+        be the certificate's common name; a peer marked TLS must not arrive in the clear."""
+        sender = getattr(headers, 'sender_id', None)
+        if tls_peer is not None:
+            if sender is None or sender.hex != tls_peer:
+                _log.warning(f'{self.proxy_name}: frame from {sender} over a TLS connection authenticated as {tls_peer}; dropped.')
+                return False
+            return True
+        peer = self.peers.get(sender)
+        if peer is not None and peer.tls:
+            _log.warning(f'{self.proxy_name}: clear-text frame from {sender}, who must use TLS; dropped.')
+            return False
+        return True
 
     def is_persistent(self, remote: ProtocolProxyPeer) -> bool:
         """Whether new connections toward this peer are kept open (the peer's own policy, else this connector's)."""

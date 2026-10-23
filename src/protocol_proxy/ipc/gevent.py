@@ -8,12 +8,14 @@ from gevent import sleep, spawn, with_timeout
 from gevent.event import AsyncResult, Event
 from gevent.greenlet import Greenlet
 from gevent.lock import RLock
-from gevent.socket import socket, getaddrinfo, AF_INET, SOCK_STREAM, SHUT_RDWR
+from gevent import ssl as gevent_ssl
+from gevent.socket import socket, getaddrinfo, AF_INET, SOCK_STREAM, SHUT_RDWR, MSG_PEEK
 from gevent.subprocess import Popen
 from uuid import UUID
 from weakref import WeakValueDictionary
 
 from . import callback, IPCConnector, ProtocolHeaders, ProtocolProxyMessage, ProtocolProxyPeer, SocketParams
+from .. import tls as _tls
 
 _log = logging.getLogger(__name__)
 
@@ -46,6 +48,7 @@ class GeventConnection:
         self.write_lock = RLock()
         self.pending: set[int] = set()
         self.closed = Event()
+        self.tls_peer: str | None = None     # common name of the peer's certificate when the connection is TLS
         self._urgent = 0                 # ordinary writers waiting for or holding the lock; low-priority ones yield
 
     @property
@@ -90,6 +93,7 @@ class GeventIPCConnector(IPCConnector):
     so a slow one does not hold up the frames behind it.
     """
     LISTEN_BACKLOG = 128
+    SSL_CONTEXT_CLASS = gevent_ssl.SSLContext      # cooperative handshakes and I/O
     # TCP keepalive on persistent connections: the kernel probes an idle connection after KEEPIDLE seconds, every
     # KEEPINTVL seconds, and resets it after KEEPCNT failed probes, so a vanished peer is noticed in under a minute.
     KEEPALIVE = {'TCP_KEEPIDLE': 15, 'TCP_KEEPINTVL': 5, 'TCP_KEEPCNT': 4}
@@ -216,6 +220,7 @@ class GeventIPCConnector(IPCConnector):
         self.connections.add(conn)
         try:
             sock.connect(address)
+            conn.sock = sock = self._tls_wrap_dialled(sock, remote)
             conn.write(self._frame(message, remote=remote))
             if message.response_expected:
                 if (frame := self._read_frame(sock)) is not None:
@@ -264,13 +269,48 @@ class GeventIPCConnector(IPCConnector):
             sock.settimeout(self.max_io_wait_seconds)
             try:
                 sock.connect(address)
+                sock = self._tls_wrap_dialled(sock, remote)
             except (OSError, Exception):
                 sock.close()
                 raise
             conn = self._open(sock, persistent=True, peer_id=remote.proxy_id)
+            conn.tls_peer = _tls.peer_common_name(sock) if remote.tls else None
             remote.connection = conn
             _log.info(f'{self.proxy_name}: opened a persistent connection to {remote.proxy_id} @ {address}.')
             return conn
+
+    def _tls_wrap_dialled(self, sock: socket, remote: ProtocolProxyPeer | None):
+        """Wrap a dialled socket in TLS when the peer is a TLS peer, and check that the certificate names it."""
+        if remote is None or not remote.tls:
+            return sock
+        if (context := self.tls_context('client')) is None:
+            raise PermissionError(f'{remote.proxy_id} requires TLS but this end has no TLS material')
+        tls_sock = context.wrap_socket(sock, server_hostname=remote.proxy_id.hex)
+        if not _tls.expect_proxy_id(tls_sock, remote.proxy_id):
+            tls_sock.close()
+            raise PermissionError(f'certificate of {remote.proxy_id} names {_tls.peer_common_name(tls_sock)}')
+        return tls_sock
+
+    def _tls_accept(self, conn: GeventConnection) -> bool:
+        """An accepted connection may be TLS or plain: peek one byte to tell. Returns False if it had to be dropped
+        (TLS offered but this end has no material, or the handshake failed)."""
+        try:
+            first = conn.sock.recv(1, MSG_PEEK)
+        except (OSError, Exception) as e:
+            _log.debug(f'{self.proxy_name}: connection from {self._peer_name(conn.sock)} ended before any data: {e}')
+            return False
+        if not _tls.is_tls_client_hello(first):
+            return True
+        if (context := self.tls_context('server')) is None:
+            _log.warning(f'{self.proxy_name}: TLS offered by {self._peer_name(conn.sock)} but this end has no TLS material.')
+            return False
+        try:
+            conn.sock = context.wrap_socket(conn.sock, server_side=True)
+            conn.tls_peer = _tls.peer_common_name(conn.sock)
+        except (OSError, Exception) as e:
+            _log.warning(f'{self.proxy_name}: TLS handshake with {self._peer_name(conn.sock)} failed: {e}')
+            return False
+        return True
 
     def _pack_headers(self, data_length: int, request_id: int, response_expected: bool, method_name: str,
                       protocol_version: int = 1, remote_id=None, keep_alive: bool = False,
@@ -385,10 +425,14 @@ class GeventIPCConnector(IPCConnector):
         """Read and dispatch frames on a connection until the other side closes it (or it fails, or we stop)."""
         reason = 'closed by the peer'
         try:
+            if conn.peer_id is None and not self._tls_accept(conn):      # accepted connections only; dialled are set up
+                return
             while not self._stop:
                 if (frame := self._read_frame(conn.sock)) is None:
                     break
                 headers, payload = frame
+                if not self.frame_identity_ok(headers, conn.tls_peer):
+                    continue
                 if headers.keep_alive and not conn.persistent:
                     self._adopt(conn, headers)
                 if headers.method_name == 'RESPONSE':

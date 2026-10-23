@@ -86,6 +86,20 @@ To run a proxy persistently, pass `persistent=True` to `get_proxy` (it reaches t
 both ends apply the same policy). The driver interfaces default to persistent since 2026-10-22 (`persistent_connection`
 per device turns it off).
 
+## TLS for remote peers
+
+`get_proxy(key, ipc_tls=True, ...)`, or a manager created with `ipc_tls=True`, makes every IPC connection with that
+proxy TLS 1.3 with mutual authentication. The manager is the certificate authority: it creates a CA of its own the
+first time, issues itself a certificate and issues each TLS proxy one naming the proxy's id, and writes
+`{"ca", "cert", "key"}` as one JSON line to the proxy's stdin after the tokens (and the AEAD key, if any); the proxy is
+launched with `--ipc-tls True`. The proxy verifies the manager's certificate against that CA and presents its own; the
+manager requires the proxy's and checks that its common name is the proxy's id; a frame's sender id must match the
+certificate it arrived under. The manager's listener tells TLS from plain by peeking at the first byte, so local plain
+proxies and remote TLS proxies share it; a proxy with TLS material accepts TLS only. Nothing is written to disk beyond
+the instant `ssl` needs the certificate chain in a file. `ipc_tls` is distinct from a protocol's own `tls` option (the
+MQTT proxy's broker TLS). Use it for proxies reached over an untrusted network without an SSH tunnel; with the SSH
+launcher it is unnecessary.
+
 ## Encryption
 
 A manager launched with `encrypt=True` (or a proxy requested with `get_proxy(..., encrypt=True)`) generates a 32-byte

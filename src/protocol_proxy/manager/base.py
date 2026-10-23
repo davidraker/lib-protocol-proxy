@@ -13,6 +13,7 @@ from weakref import WeakMethod, WeakValueDictionary
 
 from ..ipc import IPCConnector, ProtocolHeaders, ProtocolProxyMessage, ProtocolProxyPeer, SocketParams
 from ..logs import LAUNCHED_BY_MANAGER_ENV, handle_log_batch, log_entries, proxy_logger_name
+from ..tls import Authority, TlsMaterial
 from ..proxy import ProtocolProxy
 from ..proxy.launch import str2bool
 
@@ -26,8 +27,12 @@ class ProtocolProxyManager(IPCConnector, ABC):
 
     def __init__(self, *, proxy_class: Type[ProtocolProxy], proxy_name: str = 'Manager',
                  heartbeat_interval: float = 10.0, heartbeat_timeout: float = 5.0, heartbeat_misses: int = 3,
-                 **kwargs):
+                 ipc_tls: bool = False, **kwargs):
         self.unique_ids = {}
+        # TLS toward launched proxies: this manager is the certificate authority (created with the first TLS proxy)
+        # and issues itself and each TLS proxy a certificate; ``ipc_tls`` here makes it the default for every proxy.
+        self.tls_default: bool = ipc_tls
+        self.authority: Authority | None = None
         super().__init__(proxy_id=self.get_proxy_id('proxy_manager'), proxy_name=proxy_name, token=uuid4(), **kwargs)
         self.proxy_class = proxy_class
         # Heartbeat: PING every registered peer each interval; a peer that misses ``heartbeat_misses`` replies in a
@@ -35,6 +40,7 @@ class ProtocolProxyManager(IPCConnector, ABC):
         self.heartbeat_interval = heartbeat_interval
         self.heartbeat_timeout = heartbeat_timeout
         self.heartbeat_misses = heartbeat_misses
+        self.stopping_pids: set[int] = set()        # processes this manager is terminating: not heartbeat misses
         # Weak references to ``callback(peer, reason)`` callables, told when a launched proxy is lost (see on_peer_lost).
         self.peer_lost_callbacks: list = []
         self.register_callback(self.handle_peer_registration, 'REGISTER_PEER', provides_response=True)
@@ -85,6 +91,8 @@ class ProtocolProxyManager(IPCConnector, ABC):
             kwargs.setdefault('log_level', logging.getLevelName(self.proxy_logger(proxy_name).getEffectiveLevel()))
             if self.encrypt:
                 kwargs.setdefault('encrypt', True)      # the proxy must read the key the manager writes to stdin
+            if self.tls_default:
+                kwargs.setdefault('ipc_tls', True)      # and the TLS material after it
             # Launched through the generic entry point so the proxy module is imported exactly once (see launch.main).
             entry_options = ['--gevent'] if getattr(self.proxy_class, 'PATCH_GEVENT', False) else []
             manager_address = kwargs.pop('manager_address', self.inbound_params.address)
@@ -152,9 +160,11 @@ class ProtocolProxyManager(IPCConnector, ABC):
         return ProtocolProxyMessage(method_name='PING', payload=b'', response_expected=True)
 
     def peers_to_ping(self) -> list[ProtocolProxyPeer]:
-        """Registered peers launched by this manager (those with a process); a peer still registering is skipped."""
+        """Registered peers launched by this manager (those with a process); a peer still registering, or one whose
+        process this manager is stopping, is skipped (a stopping proxy refuses connections, which is not a miss)."""
         return [peer for peer in list(self.peers.values())
-                if peer.socket_params is not None and getattr(peer, 'process', None) is not None]
+                if peer.socket_params is not None and (process := getattr(peer, 'process', None)) is not None
+                and getattr(process, 'pid', None) not in self.stopping_pids]
 
     def heartbeat_answered(self, peer: ProtocolProxyPeer, raw_reply) -> None:
         """A PING reply (any reply: an old proxy answers with an unknown-method error, which still proves it alive)."""
@@ -258,6 +268,21 @@ class ProtocolProxyManager(IPCConnector, ABC):
             if proxy_id in manager.peers:
                 return manager, manager.peers[proxy_id]
         return None, None
+
+    def peer_tls(self, kwargs: dict) -> bool:
+        """Whether a proxy launched with these options talks TLS on the IPC: the ``ipc_tls`` kwarg when given, else the
+        manager's default (``tls`` is left to protocols, e.g. the MQTT proxy's broker TLS)."""
+        value = kwargs.get('ipc_tls')
+        return self.tls_default if value is None else str2bool(value)
+
+    def tls_material_for(self, proxy_id: UUID) -> TlsMaterial:
+        """Issue a TLS proxy its certificate (and give this manager its own, the first time)."""
+        if self.authority is None:
+            self.authority = Authority(f'protocol-proxy manager {self.proxy_id}')
+            addresses = [self.inbound_params.address] if self.inbound_params is not None else []
+            self.tls_material = self.authority.issue(self.proxy_id.hex, addresses)
+            self._tls_contexts.clear()
+        return self.authority.issue(proxy_id.hex)
 
     def peer_encrypted(self, kwargs: dict) -> bool:
         """Whether a proxy launched with these options gets an AEAD key: the ``encrypt`` kwarg when given (it travels

@@ -13,7 +13,8 @@ The manager launches a proxy as
 ```
 python -m protocol_proxy.proxy [--gevent] <module>:<ProxyClass> --proxy-id <hex> --proxy-name <str>
     --manager-id <hex> --manager-address <host> --manager-port <int> [--inbound-address <host>]
-    [--inbound-port <int>] [--encrypt true|false] [--persistent true|false] [--socket-logging true|false]
+    [--inbound-port <int>] [--encrypt true|false] [--ipc-tls true|false] [--manager-dials true|false]
+    [--persistent true|false] [--socket-logging true|false]
     [--compress-threshold <int>] [--log-level <LEVEL>] [--<protocol option> <value> ...]
 ```
 
@@ -24,8 +25,10 @@ A port is launched the same way by whatever command it registers for (the manage
 option is `--name value`, booleans as `true`/`false`). The environment carries `_LAUNCHED_BY_PROXY_MANAGER=1`.
 
 On **stdin** the manager writes, then closes: the proxy's token as 32 hex characters, the manager's token as 32 hex
-characters, and, when `--encrypt true`, the 32-byte AEAD key as 64 hex characters. Nothing secret is on the command
-line. A proxy launched with `--encrypt true` that finds no key exits with an error.
+characters, when `--encrypt true` the 32-byte AEAD key as 64 hex characters, and when `--ipc-tls true` one JSON line
+`{"ca": <PEM>, "cert": <PEM>, "key": <PEM>}` of TLS material issued by the manager's own CA (2026-10-22). Nothing
+secret is on the command line. A proxy launched with `--encrypt true` or `--ipc-tls true` that finds no key or no
+material exits with an error.
 
 Exit code 0 after a clean stop (SIGTERM from the manager, manager gone, or a normal end), 1 otherwise. The manager
 terminates the process with SIGTERM when it stops, kills it after 5 s, and relaunches it on the next request after an
@@ -100,6 +103,12 @@ message without detection. The mode is fixed per peer: a receiver refuses a clea
 key with and an encrypted frame from one it does not; the refused request fails (or the connection is dropped) and
 nothing else is affected. Keys live for the proxy's lifetime; a relaunch gets a fresh one. Peers advertise
 `aead-chacha20poly1305`.
+
+**TLS (2026-10-22).** With TLS material both ends speak TLS 1.3 on every connection between them, each requiring the
+other's certificate to chain to the manager's CA; the proxy's certificate names the proxy's id and the manager's names
+the manager's id, and a frame is accepted only if its sender id matches the certificate it arrived under. A manager's
+listener accepts both plain and TLS connections (a TLS record begins with byte 0x16, a frame with 0x00); a proxy with
+TLS material accepts TLS only. TLS and the per-message AEAD (§5) are independent and may be combined.
 
 ## 6. Authentication and dispatch
 

@@ -85,10 +85,12 @@ def test_real_proxy_launched_through_the_ssh_prefix(tmp_path, monkeypatch):
         manager.wait_peer_registered(peer, 25)
         assert peer.socket_params is not None, 'the proxy launched over the ssh stub did not register'
         _wait(lambda: peer.state == 'healthy', what='a heartbeat reply through the ssh-launched proxy')
+        # The stub announced itself on the pipe, which the manager read like any plain stderr line, and the proxy's
+        # own records arrive over the socket (before the level is raised, which would gate the INFO ones).
+        _wait(lambda: any('stub-ssh ran:' in r.getMessage() and r.channel == 'stderr' for r in records),
+              what=f'the stub line on the stderr pipe (got {[r.getMessage()[:40] for r in records]})')
+        _wait(lambda: any(r.channel == 'socket' for r in records), what='the proxy\'s own logs over the socket')
         assert json.loads(manager.set_proxy_log_level(peer, 'WARNING').get(timeout=5)) == {'level': 'WARNING'}
-        # The stub announced itself on the pipe, which the manager read like any plain stderr line.
-        assert any('stub-ssh ran:' in r.getMessage() and r.channel == 'stderr' for r in records)
-        assert any(r.channel == 'socket' for r in records)                 # and the proxy's own logs arrived
         manager._cleanup_proxy_process(peer.process)
         assert peer.process.returncode == 0
     finally:

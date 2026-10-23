@@ -13,6 +13,7 @@ from weakref import WeakValueDictionary
 
 from . import (callback, IPCConnector, ProtocolHeaders, ProtocolProxyCallback, ProtocolProxyMessage, ProtocolProxyPeer,
                SocketParams)
+from .. import tls as _tls
 
 _log = logging.getLogger(__name__)
 
@@ -115,7 +116,7 @@ class AsyncioIPCConnector(IPCConnector):
                 async with remote.ready:
                     transport, _ = await asyncio.wait_for(self.loop.create_connection(
                         lambda: IPCProtocol(connector=self, outgoing_message=message, outgoing_remote=remote),
-                        *address), self.connect_timeout)
+                        *address, **self._tls_dial_options(remote)), self.connect_timeout)
             except (ConnectionError, asyncio.TimeoutError, OSError) as e:
                 # TODO: How might we be smarter about this?
                 connection_attempts -= 1
@@ -140,11 +141,18 @@ class AsyncioIPCConnector(IPCConnector):
             if address is None:
                 raise ConnectionError(f'no open connection to {remote.proxy_id} and no address to dial')
             _, protocol = await asyncio.wait_for(self.loop.create_connection(
-                lambda: IPCProtocol(connector=self, persistent=True, peer_id=remote.proxy_id), *address),
-                self.connect_timeout)
+                lambda: IPCProtocol(connector=self, persistent=True, peer_id=remote.proxy_id), *address,
+                **self._tls_dial_options(remote)), self.connect_timeout)
             remote.connection = protocol
             _log.info(f'{self.proxy_name}: opened a persistent connection to {remote.proxy_id} @ {address}.')
             return protocol
+
+    def _tls_dial_options(self, remote: ProtocolProxyPeer) -> dict:
+        if not remote.tls:
+            return {}
+        if (context := self.tls_context('client')) is None:
+            raise PermissionError(f'{remote.proxy_id} requires TLS but this end has no TLS material')
+        return {'ssl': context, 'server_hostname': remote.proxy_id.hex}
 
     def _adopt(self, protocol: 'IPCProtocol', headers: ProtocolHeaders):
         """A frame with the keep-alive bit arrived on an accepted connection: the sender keeps it open, so if the
@@ -172,10 +180,12 @@ class AsyncioIPCConnector(IPCConnector):
     async def _setup_inbound_server(self, socket_params: SocketParams = None):
         on_lost_connection = self.loop.create_future()
         factory = IPCProtocol.get_factory(connector=self, on_lost_connection=on_lost_connection)
+        # With TLS material every inbound connection is TLS (an asyncio proxy talks only to its manager).
+        server_options = {'ssl': self.tls_context('server')} if self.tls_material is not None else {}
         if socket_params:
             try:
                 self.inbound_server = await self.loop.create_server(factory, *socket_params,
-                                                                    start_serving=True, family=2)
+                                                                    start_serving=True, family=2, **server_options)
                 return
             except (OSError, Exception) as e:
                 _log.warning(f'Unable to bind to provided inbound socket {socket_params}. Trying next available. - {e}')
@@ -185,7 +195,7 @@ class AsyncioIPCConnector(IPCConnector):
             try:
                 next_port = next(self.unused_ports(await self._get_ip_addresses(socket_params.address)))
                 self.inbound_server = await self.loop.create_server(factory, socket_params.address, next_port,
-                                                                    start_serving=True, family=2)
+                                                                    start_serving=True, family=2, **server_options)
                 #_log.debug(f'{self.proxy_name} AFTER START SERVING. Server is: {self.inbound_server}')
             except OSError:
                 continue
@@ -223,6 +233,7 @@ class IPCProtocol(BufferedProtocol):
         self.persistent, self.peer_id = persistent, peer_id
         self.pending: set[int] = set()          # request ids awaiting responses on this connection
         self._lost = False
+        self.tls_peer: str | None = None        # common name of the peer's certificate when the connection is TLS
         # _log.debug(f'{self.connector.proxy_name} INBOUND ASyncioIPC PROTOCOL: IN PROTOCOL INIT')
         self.minimum_read_size = minimum_read_size  # TODO: Default is V1 header length. Is this appropriate?
         self.outgoing_message = outgoing_message
@@ -299,6 +310,8 @@ class IPCProtocol(BufferedProtocol):
                 data = self.received_data[header_end:message_end]
                 self.head = message_end % self.buffer_size
                 self.count -= frame_length
+                if not self.connector.frame_identity_ok(headers, self.tls_peer):
+                    continue
                 try:
                     data = memoryview(self.connector.open_frame(headers, raw_header, data))
                 except Exception as e:      # refused clear text, no key, failed authentication, corrupt compression
@@ -368,6 +381,13 @@ class IPCProtocol(BufferedProtocol):
         try:
             self.transport = transport
             self.connector.connections.add(self)
+            if transport.get_extra_info('sslcontext') is not None:
+                self.tls_peer = _tls.peer_common_name(transport.get_extra_info('ssl_object'))
+                expected = self.peer_id or (self.outgoing_remote.proxy_id if self.outgoing_remote else None)
+                if expected is not None and self.tls_peer != expected.hex:
+                    _log.warning(f'{self.connector.proxy_name} -- certificate of {expected} names {self.tls_peer}; closing.')
+                    transport.close()
+                    return
             if self.persistent:
                 self._make_persistent(self.peer_id)
             if self.outgoing_message:

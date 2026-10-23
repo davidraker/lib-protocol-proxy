@@ -33,7 +33,8 @@ class ProtocolProxy(IPCConnector, metaclass=abc.ABCMeta):
 
     def __init__(self, *, manager_address: str, manager_port: int, manager_id: UUID,
                  registration_retry_delay: float = 20.0, manager_watch_interval: float = 1.0,
-                 socket_logging: bool = True, key: bytes | None = None, manager_dials: bool = False, **kwargs):
+                 socket_logging: bool = True, key: bytes | None = None, manager_dials: bool = False,
+                 ipc_tls=None, **kwargs):
         """NOTE: Proxy implementations MUST:
             1. Subclass a multitasking subclass of IPCConnector (gevent, asyncio, etc.)
             2. Subclass this "ProtocolProxy" class.
@@ -42,10 +43,12 @@ class ProtocolProxy(IPCConnector, metaclass=abc.ABCMeta):
             5. Call send_registration asynchronously in their constructor after super calls.
         """
         #_log.debug('PP: IN INIT.')
-        super(ProtocolProxy, self).__init__(**kwargs)
+        super(ProtocolProxy, self).__init__(tls_material=ipc_tls, **kwargs)
         # The AEAD key the manager wrote to stdin after the tokens (None: clear text). Flavours put it on their
-        # manager peer, so every frame to and from the manager is encrypted.
+        # manager peer, so every frame to and from the manager is encrypted. With TLS material, every connection with
+        # the manager is TLS, mutually authenticated against the manager's CA.
         self.manager_key: bytes | None = key
+        self.manager_tls: bool = ipc_tls is not None
         if self.encrypt and key is None:
             raise ValueError(f'{self.proxy_name}: --encrypt is set but no key was provided on stdin.')
         self.registration_retry_delay: float = registration_retry_delay

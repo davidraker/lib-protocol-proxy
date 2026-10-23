@@ -101,17 +101,21 @@ class AsyncioProtocolProxyManager(ProtocolProxyManager, AsyncioIPCConnector, ABC
             _log.info(f"PPM: Created new ProtocolProxy {proxy_name} with ID {str(proxy_id)}, pid: {proxy_process.pid}")
             peer_token = uuid4()
             key = self.new_key() if self.peer_encrypted(kwargs) else None
+            tls = self.peer_tls(kwargs)
+            material = self.tls_material_for(proxy_id) if tls else None
             proxy_process.stdin.write(peer_token.hex.encode())
             proxy_process.stdin.write(self.token.hex.encode())
             if key is not None:
                 proxy_process.stdin.write(key.hex().encode())
+            if material is not None:
+                proxy_process.stdin.write(material.to_line())
             await proxy_process.stdin.drain()
             proxy_process.stdin.close()
             proxy_process.stdin = None
             dial = self.dial_target(kwargs)
             self.peers[proxy_id] = peer = AsyncioProtocolProxyPeer(
                 process=proxy_process, proxy_id=proxy_id, token=peer_token, name=proxy_name,
-                persistent=True if dial else self.peer_policy(kwargs), dial_params=dial, key=key)
+                persistent=True if dial else self.peer_policy(kwargs), dial_params=dial, key=key, tls=tls)
             if dial is not None:
                 self.loop.create_task(self._dial_until_registered(peer))
             self._setup_exit(proxy_process)

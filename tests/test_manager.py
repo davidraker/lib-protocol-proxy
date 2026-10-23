@@ -68,10 +68,12 @@ def test_class_get_proxy_pops_manager_callbacks():
 
 
 class _RecordingStdin(io.BytesIO):
-    """What the manager writes to the child's stdin stays readable after close (as FakeProcess.last_stdin)."""
-    def close(self):
+    """What the manager writes to the child's stdin is kept as FakeProcess.last_stdin (recorded on each write, not on
+    close: a never-closed instance being garbage-collected would otherwise overwrite it with nothing)."""
+    def write(self, data):
+        n = super().write(data)
         FakeProcess.last_stdin = self.getvalue()
-        super().close()
+        return n
 
 
 class FakeProcess:

@@ -110,7 +110,9 @@ class GeventProtocolProxyManager(ProtocolProxyManager, GeventIPCConnector, ABC):
             dial = self.dial_target(kwargs)
             peer = GeventProtocolProxyPeer(process=None, proxy_id=proxy_id, token=uuid4(), name=proxy_name,
                                            persistent=True if dial else self.peer_policy(kwargs), dial_params=dial,
-                                           key=self.new_key() if self.peer_encrypted(kwargs) else None)
+                                           key=self.new_key() if self.peer_encrypted(kwargs) else None,
+                                           tls=self.peer_tls(kwargs))
+            material = self.tls_material_for(proxy_id) if peer.tls else None
             self.peers[proxy_id] = peer
             try:
                 proxy_process = Popen(command, stdin=PIPE, stdout=PIPE, stderr=PIPE, env=self.proxy_environment())
@@ -129,6 +131,8 @@ class GeventProtocolProxyManager(ProtocolProxyManager, GeventIPCConnector, ABC):
             proxy_process.stdin.write(self.token.hex.encode())
             if peer.key is not None:
                 proxy_process.stdin.write(peer.key.hex().encode())
+            if material is not None:
+                proxy_process.stdin.write(material.to_line())
             proxy_process.stdin.flush()
             proxy_process.stdin.close()
             proxy_process.stdin = open(os.devnull)
@@ -153,6 +157,7 @@ class GeventProtocolProxyManager(ProtocolProxyManager, GeventIPCConnector, ABC):
     def _cleanup_proxy_process(self, process: Popen, timeout: float = 5.0):
         # TODO: Waits may block. Check this and change to a method that yields if needed.
         if process.poll() is None:
+            self.stopping_pids.add(process.pid)
             try:
                 _log.info(f'Terminating {self.proxy_class.__name__} with PID: {process.pid}')
                 process.terminate()
@@ -165,3 +170,5 @@ class GeventProtocolProxyManager(ProtocolProxyManager, GeventIPCConnector, ABC):
                 process.kill()
             except Exception as e:
                 _log.warning(f'Exception encountered attempting to terminate proxy process ({process.pid}): {e}')
+            finally:
+                self.stopping_pids.discard(process.pid)
