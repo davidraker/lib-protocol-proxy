@@ -3,7 +3,7 @@ import logging
 import os
 
 from abc import ABC
-from gevent import sleep, spawn, Greenlet
+from gevent import joinall, sleep, spawn, Greenlet
 from gevent.subprocess import Popen, PIPE
 from gevent.timeout import Timeout
 from uuid import uuid4
@@ -153,6 +153,19 @@ class GeventProtocolProxyManager(ProtocolProxyManager, GeventIPCConnector, ABC):
     @callback
     def handle_log(self, headers: ProtocolHeaders, raw_message: bytes):
         return super().handle_log(headers, raw_message)
+
+    def stop(self, terminate_proxies: bool = True, timeout: float = 5.0):
+        """Stop the manager and, by default, the proxies it launched: SIGTERM each process, SIGKILL after ``timeout``
+        (the same clean-up the manager host's exit performs), so a stopped manager leaves no orphans. A caller that
+        hands its processes over (for example to another manager) passes ``terminate_proxies=False``."""
+        if self._heartbeat is not None:
+            self._heartbeat.kill(block=False)
+            self._heartbeat = None
+        super().stop()
+        if terminate_proxies:
+            processes = [peer.process for peer in self.peers.values()
+                         if getattr(peer, 'process', None) is not None and peer.process.poll() is None]
+            joinall([spawn(self._cleanup_proxy_process, process, timeout) for process in processes], timeout=2 * timeout + 1)
 
     def _cleanup_proxy_process(self, process: Popen, timeout: float = 5.0):
         # TODO: Waits may block. Check this and change to a method that yields if needed.

@@ -5,6 +5,7 @@ import logging
 
 from gevent import sleep
 
+from protocol_proxy.ipc import callback
 from protocol_proxy.proxy.asyncio import AsyncioProtocolProxy
 from protocol_proxy.proxy.gevent import GeventProtocolProxy
 
@@ -14,6 +15,14 @@ _log = logging.getLogger(__name__)
 class GeventDummy(GeventProtocolProxy):
     LAUNCHER = 'launch_gevent_dummy'
 
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.register_callback(self.handle_echo, 'ECHO', provides_response=True)
+
+    @callback
+    def handle_echo(self, headers, raw_message: bytes) -> bytes:
+        """ECHO: the payload comes straight back (the conformance harness's round trip)."""
+        return raw_message
 
     def main_loop(self):
         n = 0
@@ -29,6 +38,15 @@ def launch_gevent_dummy(parser):
 
 
 class AsyncioDummy(AsyncioProtocolProxy):
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.register_callback(self.handle_echo, 'ECHO', provides_response=True)
+
+    @callback
+    def handle_echo(self, headers, raw_message: bytes) -> bytes:
+        """ECHO: the payload comes straight back (the conformance harness's round trip)."""
+        return raw_message
 
     async def _ticker(self):
         n = 0

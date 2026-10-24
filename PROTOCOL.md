@@ -227,3 +227,15 @@ keepalive on persistent connections are the cheaper first signals.
 - `PING`, `LOG` and `SET_LOG_LEVEL` are optional for a port; the manager treats an unknown-method error to `PING` as
   life, and a port that never sends `LOG` is simply read from its pipes.
 - A port that implements only ChaCha20-Poly1305 omits `aead-aes256gcm` from its features and is never sent AES-GCM.
+
+## 12. Conformance (2026-10-24)
+
+`protocol-proxy-conformance <manifest.toml | name> [--echo METHOD] [--tls] [--manager-dials] [--option name=value]`
+launches the proxy a manifest describes through the Python manager and checks the contract above: registration with a
+feature list; the `PING` reply's shape; the error reply for an unknown method; `SET_LOG_LEVEL` when advertised; a
+version 1 header; per-message and persistent connections, including a frame above the persistent threshold; encryption
+with each AEAD the proxy advertises, with a 64 KiB payload so compression and encryption combine; TLS and
+manager-initiated registration when requested; and exit code 0 on SIGTERM. A method that replies with its payload
+(`--echo`) lets the payload checks run; without one they are skipped. A port is expected to pass every check that is
+not skipped. The Python proxies pass (`tests/test_conformance.py`); the gevent and asyncio test dummies pass with every
+option, which is the reference a port is measured against.

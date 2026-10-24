@@ -41,6 +41,7 @@ classifiers = [
 
 [tool.poetry.scripts]
 protocol-proxy-manifests = "protocol_proxy.manifest:main"
+protocol-proxy-conformance = "protocol_proxy.conformance:main"
 
 [tool.poetry.dependencies]
 python = ">=3.10,<4.0"

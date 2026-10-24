@@ -52,6 +52,13 @@ into one of them. `protocol-proxy-manifests list` shows what a manager here woul
 `export` copies the installed Python proxies' manifests into the environment's directory. The format is in
 PROTOCOL.md, "Manifests".
 
+# Conformance
+
+`protocol-proxy-conformance <manifest or name> [--echo METHOD] [--tls] [--manager-dials]` launches a proxy, in any
+language, through this manager and checks every part of the wire contract (PROTOCOL.md §12). It is the acceptance test
+for ports and for changes here; `tests/test_conformance.py` runs it against the test dummies and the installed Python
+proxies.
+
 # Process supervision
 
 A `ProtocolProxyManager` launches one proxy process per proxy key and watches it. When a proxy process exits, the
