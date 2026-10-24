@@ -352,10 +352,10 @@ class ProtocolProxyManager(IPCConnector, ABC):
         to the proxy as ``--log-level``, so operators tune a proxy like any other logger."""
         return logging.getLogger(proxy_logger_name(self.manifest.name, proxy_name))
 
-    def proxy_environment(self) -> dict[str, str]:
-        """Environment for a launched proxy: the manager's, the manifest's, and the marker that selects the JSON log
-        channel."""
-        return {**os.environ, **self.manifest.environment, LAUNCHED_BY_MANAGER_ENV: '1'}
+    def proxy_environment(self, python: str | None = None) -> dict[str, str]:
+        """Environment for a launched proxy: the manager's, the manifest's (with ``{python}`` and ``{manifest_dir}``
+        resolved), and the marker that selects the JSON log channel."""
+        return {**os.environ, **self.manifest.launch_environment(python or sys.executable), LAUNCHED_BY_MANAGER_ENV: '1'}
 
     def log_subprocess_output(self, stream, logger: logging.Logger, stream_name: str = 'stderr',
                               pid: int | None = None, process_name: str | None = None):

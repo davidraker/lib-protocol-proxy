@@ -1,0 +1,12 @@
+# The AsyncioDummy test proxy (tests/dummy_proxies.py) as a manifest, so a manager in any language can launch the Python
+# reference proxy and be measured against it with its own conformance command, for example
+#   protocol-proxy-go/bin/conformance protocol-proxy/tests/manifests/AsyncioDummy.toml --echo ECHO --tls --manager-dials \
+#       --python <venv>/bin/python
+# The Python harness itself (tests/test_conformance.py) also runs from these files.
+[proxy]
+name = "AsyncioDummy"
+command = ["{python}", "-m", "protocol_proxy.proxy", "dummy_proxies:AsyncioDummy"]
+header_version = 2
+
+[environment]
+PYTHONPATH = "{manifest_dir}/.."

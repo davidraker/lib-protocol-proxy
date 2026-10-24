@@ -81,8 +81,28 @@ def test_for_proxy_class_mirrors_the_python_entry_point():
     assert g.name == 'GeventDummy' and g.process_key(('k', 1), {}) == ('k', 1)
 
 
+def test_environment_values_resolve_the_same_placeholders_as_the_command(tmp_path):
+    path = tmp_path / 'native' / 'proxy.toml'
+    path.parent.mkdir()
+    path.write_text('[proxy]\nname = "native"\ncommand = ["{manifest_dir}/bin/native"]\n'
+                    '[environment]\nLD_LIBRARY_PATH = "{manifest_dir}/lib"\nPYTHON = "{python}"\nPLAIN = "x"\n')
+    m = Manifest.load(path)
+    assert m.environment['LD_LIBRARY_PATH'] == '{manifest_dir}/lib'                     # as written
+    assert m.launch_environment('/venv/bin/python') == {'LD_LIBRARY_PATH': f'{path.parent}/lib',
+                                                        'PYTHON': '/venv/bin/python', 'PLAIN': 'x'}
+
+
+def test_shipped_dummy_manifests_load_and_put_the_tests_directory_on_the_path():
+    tests_dir = Path(__file__).resolve().parent
+    for name in ('GeventDummy', 'AsyncioDummy'):
+        m = Manifest.load(tests_dir / 'manifests' / f'{name}.toml')
+        assert m.name == name and m.command[-1] == f'dummy_proxies:{name}'
+        assert Path(m.launch_environment('py')['PYTHONPATH']).resolve() == tests_dir
+
+
 @pytest.mark.parametrize('toml, message', [
     ('[identity]\nkeys = ["a"]', 'table is required'),
+    ('[proxy]\nname = "x"\ncommand = ["x"]\n[environment]\nHOME = "{home}"', 'unknown placeholder'),
     ('[proxy]\nname = "x"\ncommand = []', 'non-empty list of strings'),
     ('[proxy]\nname = "x"\ncommand = ["{shell}"]', 'unknown placeholder'),
     ('[proxy]\nname = "x"\ncommand = ["x"]\n[identity]\nkeys = ["h"]\n[identity.normalize]\nh = ["eval"]', 'unknown normaliser'),

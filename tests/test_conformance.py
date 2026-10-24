@@ -24,6 +24,17 @@ def test_dummies_pass_every_check(proxy_class):
     assert any(c.name.startswith('encrypted (aes-256-gcm)') for c in report.checks), report.text()
 
 
+@pytest.mark.parametrize('name', ['GeventDummy', 'AsyncioDummy'])
+def test_shipped_dummy_manifests_pass_every_check(name, monkeypatch):
+    """The manifests under tests/manifests launch the dummies the way a manager in another language would: through
+    the generic entry point, with PYTHONPATH from the manifest rather than from this process."""
+    monkeypatch.delenv('PYTHONPATH', raising=False)
+    manifest = Manifest.load(Path(__file__).resolve().parent / 'manifests' / f'{name}.toml')
+    report = run(manifest, echo_method='ECHO', tls=True, manager_dials=True, timeout=20)
+    assert report.ok, report.text()
+    assert not any(c.skipped for c in report.checks), report.text()
+
+
 STANDALONE = ('dnp3', 'ieee2030_5', 'modbus')      # proxies whose process starts with no protocol-specific options
 
 

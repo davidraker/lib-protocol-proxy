@@ -136,6 +136,8 @@ class Manifest:
         environment = _table(data, 'environment', where)
         if any(not isinstance(k, str) or not isinstance(v, str) for k, v in environment.items()):
             raise ManifestError(f'{where} [environment]: values must be strings')
+        for key, value in environment.items():
+            _check_placeholders(value, f'{where} [environment] {key}')
         self_test = _table(data, 'self_test', where)
         _only(self_test, {'command'}, f'{where} [self_test]')
         test_command = _command(self_test['command'], f'{where} [self_test] command') if self_test else None
@@ -160,11 +162,19 @@ class Manifest:
                    command=('{python}', '-m', 'protocol_proxy.proxy', *entry_options, f'{module}:{class_name}'))
 
     # ---- use -----------------------------------------------------------------------------------------------------
+    def _resolve(self, text: str, python: str) -> str:
+        values = {'python': python, 'manifest_dir': str(self.source.parent) if self.source else ''}
+        return _PLACEHOLDER.sub(lambda m: values[m.group(1)], text)
+
     def launch_command(self, python: str, standard_options: list[str] | tuple[str, ...] = ()) -> list[str]:
         """The argv to start the proxy: the manifest's command with placeholders resolved, then the manager's
         standard options (``--proxy-id`` and the rest)."""
-        values = {'python': python, 'manifest_dir': str(self.source.parent) if self.source else ''}
-        return [_PLACEHOLDER.sub(lambda m: values[m.group(1)], part) for part in self.command] + list(standard_options)
+        return [self._resolve(part, python) for part in self.command] + list(standard_options)
+
+    def launch_environment(self, python: str) -> dict[str, str]:
+        """The ``[environment]`` table with ``{python}`` and ``{manifest_dir}`` resolved, ready to add to the
+        process environment (e.g. ``PYTHONPATH = "{manifest_dir}/.."`` or ``LD_LIBRARY_PATH = "{manifest_dir}/lib"``)."""
+        return {key: self._resolve(value, python) for key, value in self.environment.items()}
 
     def process_key(self, unique_remote_id: tuple, options: Mapping[str, Any]) -> tuple:
         return self.identity.key(self.name, unique_remote_id, options)
@@ -303,13 +313,17 @@ def _table(data: Mapping[str, Any], key: str, where: str, required: bool = False
     return table
 
 
+def _check_placeholders(text: str, where: str):
+    for placeholder in _PLACEHOLDER.findall(text):
+        if placeholder not in PLACEHOLDERS:
+            raise ManifestError(f'{where}: unknown placeholder {{{placeholder}}}; allowed: {sorted(PLACEHOLDERS)}')
+
+
 def _command(value: Any, where: str) -> tuple[str, ...]:
     if not isinstance(value, list) or not value or any(not isinstance(p, str) or not p for p in value):
         raise ManifestError(f'{where}: must be a non-empty list of strings')
     for part in value:
-        for placeholder in _PLACEHOLDER.findall(part):
-            if placeholder not in PLACEHOLDERS:
-                raise ManifestError(f'{where}: unknown placeholder {{{placeholder}}}; allowed: {sorted(PLACEHOLDERS)}')
+        _check_placeholders(part, where)
     return tuple(value)
 
 

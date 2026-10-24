@@ -61,8 +61,9 @@ must_match = ["username", "password"]   # remotes that share a process must agre
 host = ["strip", "lowercase"]
 port = [{ default = 1883 }]
 
-[environment]                       # added to the process environment
+[environment]                       # added to the process environment; {python} and {manifest_dir} are resolved
 MQTT_LOG = "info"
+LD_LIBRARY_PATH = "{manifest_dir}/lib"
 
 [self_test]                         # optional: a command that exits non-zero if the binary is not what it claims
 command = ["{manifest_dir}/bin/mqtt-proxy", "--self-test"]
@@ -70,7 +71,8 @@ command = ["{manifest_dir}/bin/mqtt-proxy", "--self-test"]
 
 The manager runs `command` with `{python}` replaced by its interpreter (the remote one behind an SSH prefix) and
 `{manifest_dir}` by the manifest's directory, then appends the standard options of §1 and the protocol-specific launch
-options as `--name value`. The process key is `(name, *normalised identity options)` when `keys` is given, else the
+options as `--name value`. The same two placeholders are resolved in `[environment]` values; any other `{name}` in a
+command or an environment value is an error when the manifest is read. The process key is `(name, *normalised identity options)` when `keys` is given, else the
 caller's key unchanged; two remotes with the same key share a process, and a remote whose `must_match` options differ
 from the first remote's is refused.
 
