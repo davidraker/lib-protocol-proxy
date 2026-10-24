@@ -311,7 +311,13 @@ class IPCProtocol(BufferedProtocol):
                 data = self.received_data[header_end:message_end]
                 self.head = message_end % self.buffer_size
                 self.count -= frame_length
-                if not self.connector.frame_identity_ok(headers, self.tls_peer):
+                if not self.connector.frame_identity_ok(headers, self.tls_peer) \
+                        or not self.connector.frame_authenticated(headers):
+                    if getattr(headers, 'response_expected', False):
+                        self._reply(headers, b'')                 # §6: a request from a stranger gets an empty reply
+                    if not self.persistent:
+                        self.transport.close()
+                        return
                     continue
                 try:
                     data = memoryview(self.connector.open_frame(headers, raw_header, data))
@@ -369,7 +375,8 @@ class IPCProtocol(BufferedProtocol):
                 self.transport.close()
 
     def _reply(self, headers, payload: bytes):
-        message = ProtocolProxyMessage(method_name='RESPONSE', payload=payload, request_id=headers.request_id)
+        message = ProtocolProxyMessage(method_name='RESPONSE', payload=payload, request_id=headers.request_id,
+                                       protocol_version=getattr(headers, 'VERSION', 2))    # answered in the version it was asked in
         if self.transport is None or self.transport.is_closing():
             _log.warning(f'{self.connector.proxy_name} -- Connection gone before answering {headers.method_name}'
                          f' (request_id: {headers.request_id}).')

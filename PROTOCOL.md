@@ -38,7 +38,9 @@ exit. The proxy watches its parent PID (every 1 s) and stops when re-parented.
 **Manager-initiated registration (2026-10-22).** A proxy launched with `--manager-dials true` does not dial the
 manager: it listens on `--inbound-address:--inbound-port` and waits. The manager opens a persistent connection to it
 and sends `PING` until the proxy registers over that connection (§7); the proxy adopts the connection only when its
-frames authenticate as the manager (sender id and token). Everything afterwards travels on that connection.
+frames authenticate as the manager (sender id and token), and answers those `PING`s before it has registered (the one
+exception to §7's rule that nothing is exchanged before registration). Everything afterwards travels on that
+connection.
 
 ## 1a. Manifests (2026-10-24)
 
@@ -87,7 +89,8 @@ proxy; a proxy class in the same environment can still be given directly, which 
 ## 2. Transport
 
 TCP on `AF_INET`. Both ends listen: the manager on `--manager-address:--manager-port`, the proxy on
-`--inbound-address:--inbound-port`, or the first free port in 22801..22899.
+`--inbound-address:--inbound-port`, or the first free port in 22801..22899 (also when the requested port cannot be
+bound; the port actually used is the one registered in §7).
 
 **Per message (default).** The sender connects, writes one frame and either closes (no response expected) or reads
 one `RESPONSE` frame and closes. The receiver reads frames until the sender closes; after a frame whose header has no
@@ -110,7 +113,7 @@ A frame is a 2-byte big-endian version word, a fixed header of that version, the
 | version | `H` | 2 | 1 or 2; 2 is sent by default, 1 is still accepted |
 | data_length | `Q` | 8 | payload bytes that follow the header, as they are on the wire |
 | method_name | `32s` | 32 | UTF-8, NUL-padded; at most 32 bytes |
-| request_id | `I` (`H` in version 1) | 4 (2) | drawn by the sender per header version, cycling from 1; a response carries the request's id |
+| request_id | `I` (`H` in version 1) | 4 (2) | drawn by the sender per header version, cycling over 1 to 2^16-2 (version 1) or 1 to 2^32-2 (version 2); a response carries the request's id and is sent in the request's header version |
 | sender_id | `16s` | 16 | the sender's proxy id (UUID bytes) |
 | sender_token | `16s` | 16 | the sender's token (UUID bytes) |
 | bitflags | `H` | 2 | see below |
@@ -135,7 +138,9 @@ Payloads are UTF-8 JSON before compression or encryption. An empty payload is al
 ## 4. Compression (2026-10-22)
 
 A sender may zlib-compress a payload (zlib framing, default level) and set bit 1; `data_length` counts the
-compressed bytes. It does so only toward a peer that advertised `compress` (§7) and only for payloads above its own
+compressed bytes. Compressed bytes differ between zlib implementations (zlib-ng and classic zlib produce different
+streams for the same input), so a receiver must never compare them and the compressed test vectors are checked by
+decompressing them, not byte for byte. It does so only toward a peer that advertised `compress` (§7) and only for payloads above its own
 threshold (Python: 4096 bytes). Receivers always accept both forms. Order with encryption: compress, then encrypt;
 decrypt, then decompress.
 
@@ -163,7 +168,9 @@ TLS material accepts TLS only. TLS and the per-message AEAD (§5) are independen
 ## 6. Authentication and dispatch
 
 A receiver accepts a frame only if `sender_id` names a peer it knows and `sender_token` equals that peer's token;
-otherwise the frame is logged and dropped (a request gets an empty reply). Handlers are keyed by `(method_name,
+otherwise the frame is logged and dropped (a request gets an empty `RESPONSE`, so the stranger's call fails at once
+rather than timing out). This holds for every frame, including those on a connection that was authenticated when it
+was adopted, and in addition to the TLS identity check (§5). Handlers are keyed by `(method_name,
 remote_id)` first and `method_name` second; a proxy serving several remotes tags its pushes with the remote's id.
 
 A request that expects a response but names an unknown method, or a method whose handler gives no response, is

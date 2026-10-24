@@ -302,6 +302,19 @@ class IPCConnector(metaclass=ABCMeta):
             return False
         return True
 
+    def frame_authenticated(self, headers: ProtocolHeaders) -> bool:
+        """PROTOCOL.md §6: a frame is accepted only if its sender is a peer this connector knows and the frame carries
+        that peer's token. Anything else is logged and dropped (the caller answers a request with an empty reply)."""
+        sender = getattr(headers, 'sender_id', None)
+        peer = self.peers.get(sender)
+        if peer is None:
+            _log.warning(f'{self.proxy_name}: {headers.method_name} from unknown peer {sender}; dropped.')
+            return False
+        if peer.token != getattr(headers, 'sender_token', None):
+            _log.warning(f'{self.proxy_name}: {headers.method_name} from {sender} with the wrong token; dropped.')
+            return False
+        return True
+
     def is_persistent(self, remote: ProtocolProxyPeer) -> bool:
         """Whether new connections toward this peer are kept open (the peer's own policy, else this connector's)."""
         return self.persistent if remote.persistent is None else remote.persistent

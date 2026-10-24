@@ -390,7 +390,8 @@ class GeventIPCConnector(IPCConnector):
             self._reply(conn, headers, result)
 
     def _reply(self, conn: GeventConnection, headers: ProtocolHeaders, payload):
-        response = ProtocolProxyMessage(method_name='RESPONSE', payload=payload, request_id=headers.request_id)
+        response = ProtocolProxyMessage(method_name='RESPONSE', payload=payload, request_id=headers.request_id,
+                                        protocol_version=getattr(headers, 'VERSION', 2))   # answered in the version it was asked in
         try:
             conn.write(self._frame(response, keep_alive=conn.persistent, remote=self.peers.get(headers.sender_id)))
         except (OSError, Exception) as e:
@@ -432,8 +433,12 @@ class GeventIPCConnector(IPCConnector):
                 if (frame := self._read_frame(conn.sock)) is None:
                     break
                 headers, payload = frame
-                if not self.frame_identity_ok(headers, conn.tls_peer):
-                    continue
+                if not self.frame_identity_ok(headers, conn.tls_peer) or not self.frame_authenticated(headers):
+                    if getattr(headers, 'response_expected', False):
+                        self._reply(conn, headers, b'')         # §6: a request from a stranger gets an empty reply
+                    if conn.persistent:
+                        continue
+                    break
                 if headers.keep_alive and not conn.persistent:
                     self._adopt(conn, headers)
                 if headers.method_name == 'RESPONSE':

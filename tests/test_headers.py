@@ -7,7 +7,7 @@ from uuid import uuid4
 import asyncio
 
 from protocol_proxy.ipc import HeadersV1, HeadersV2, ProtocolProxyMessage
-from protocol_proxy.ipc.asyncio import AsyncioIPCConnector, IPCProtocol
+from protocol_proxy.ipc.asyncio import AsyncioIPCConnector, AsyncioProtocolProxyPeer, IPCProtocol
 from protocol_proxy.proxy.gevent import GeventProtocolProxy
 
 
@@ -102,6 +102,7 @@ def test_asyncio_frames_dispatch_by_their_own_header_version():
     """One connection receives a V2 frame for remote A, then a V1 frame; each reaches the right callback."""
     async def main():
         connector = AsyncioIPCConnector(proxy_id=uuid4(), token=uuid4(), proxy_name='c')
+        connector.peers[connector.proxy_id] = AsyncioProtocolProxyPeer(proxy_id=connector.proxy_id, token=connector.token)
         remote = uuid4()
         got = []
         connector.register_callback(lambda conn, headers, data: got.append(('default', headers.remote_id, data)), 'PUSH')
@@ -136,6 +137,7 @@ def test_asyncio_receives_frames_larger_than_its_buffer_and_across_the_ring_end(
     whole payload; small frames that straddle the end of the ring are straightened out rather than lost."""
     async def main():
         connector = AsyncioIPCConnector(proxy_id=uuid4(), token=uuid4(), proxy_name='c')
+        connector.peers[connector.proxy_id] = AsyncioProtocolProxyPeer(proxy_id=connector.proxy_id, token=connector.token)
         got = []
         connector.register_callback(lambda conn, headers, data: got.append((headers.request_id, bytes(data))), 'PUSH')
         protocol = IPCProtocol(connector=connector)
@@ -199,3 +201,46 @@ def test_aes_gcm_bit_round_trips():
         assert headers.encrypted and headers.aes_gcm
         assert not cls.unpack(cls(3, 'M', 7, sender, token, encrypted=True).pack()[2:]).aes_gcm
     assert HeadersV1.AES_GCM_BIT == 4
+
+
+def test_frames_from_strangers_are_dropped_with_an_empty_reply_and_answered_in_their_version():
+    """PROTOCOL.md §6 and §3: a request whose sender is unknown or carries the wrong token gets an empty RESPONSE at
+    once; a request in header version 1 is answered in version 1."""
+    import json
+    import socket
+    import struct
+    from uuid import uuid4
+    import gevent
+    from protocol_proxy.ipc import ProtocolProxyMessage
+    from protocol_proxy.ipc.gevent import GeventIPCConnector, GeventProtocolProxyPeer
+    from protocol_proxy.ipc.headers import HeadersV1, HeadersV2
+    b = GeventIPCConnector(proxy_id=uuid4(), token=uuid4(), proxy_name='b')
+    b.register_callback(lambda ipc, headers, raw: b'pong', 'PONG', provides_response=True)
+    b.start(); loop = gevent.spawn(b.select_loop); gevent.sleep(0.2)      # let the accept loop start
+    try:
+        friend_id, friend_token = uuid4(), uuid4()
+        b.peers[friend_id] = GeventProtocolProxyPeer(proxy_id=friend_id, token=friend_token)
+
+        def ask(version, sender_id, sender_token):
+            cls = HeadersV1 if version == 1 else HeadersV2
+            header = cls(data_length=0, method_name='PONG', request_id=7, sender_id=sender_id, sender_token=sender_token,
+                         response_expected=True, **({} if version == 1 else {'remote_id': None})).pack()
+            with socket.create_connection((b.inbound_params.address, b.inbound_params.port), timeout=5) as sock:
+                sock.sendall(header)
+                gevent.sleep(0.3)            # a plain socket blocks the hub: let the server greenlet answer first
+                sock.settimeout(5)
+                raw = sock.recv(4096)
+            (reply_version,) = struct.unpack('>H', raw[:2])
+            reply = (HeadersV1 if reply_version == 1 else HeadersV2).unpack(raw[2:2 + (HeadersV1 if reply_version == 1 else HeadersV2).HEADER_LENGTH])
+            return reply_version, reply, raw[2 + reply.HEADER_LENGTH:]
+
+        version, reply, payload = ask(2, friend_id, friend_token)
+        assert (version, reply.method_name, payload) == (2, 'RESPONSE', b'pong')
+        version, reply, payload = ask(1, friend_id, friend_token)
+        assert (version, reply.method_name, payload) == (1, 'RESPONSE', b'pong')        # answered in version 1
+        version, reply, payload = ask(2, uuid4(), friend_token)                        # unknown sender
+        assert (reply.method_name, reply.request_id, payload) == ('RESPONSE', 7, b'')
+        version, reply, payload = ask(2, friend_id, uuid4())                           # wrong token
+        assert (reply.method_name, payload) == ('RESPONSE', b'')
+    finally:
+        b.stop(); gevent.joinall([loop], timeout=2)
