@@ -18,7 +18,7 @@ _log = logging.getLogger(__name__)
 
 
 class AsyncioProtocolProxyManager(ProtocolProxyManager, AsyncioIPCConnector, ABC):
-    def __init__(self, proxy_class: Type[ProtocolProxy], **kwargs):
+    def __init__(self, proxy_class: Type[ProtocolProxy] | None = None, **kwargs):
         super().__init__(proxy_class=proxy_class, **kwargs)
         self._heartbeat: asyncio.Task | None = None
 

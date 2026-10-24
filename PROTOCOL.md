@@ -40,6 +40,42 @@ manager: it listens on `--inbound-address:--inbound-port` and waits. The manager
 and sends `PING` until the proxy registers over that connection (§7); the proxy adopts the connection only when its
 frames authenticate as the manager (sender id and token). Everything afterwards travels on that connection.
 
+## 1a. Manifests (2026-10-24)
+
+How a manager learns what to launch and how to key its processes is data, not code: a proxy ships a `proxy.toml`
+manifest and the manager, in any language, reads it. Nothing in a manifest is executable.
+
+```toml
+[proxy]
+name = "mqtt"                       # the proxy's name: the manager key and the first element of a process key
+command = ["{python}", "-m", "protocol_proxy.proxy", "--gevent", "protocol_proxy.protocol.mqtt.mqtt_proxy:MQTTProxy"]
+header_version = 2                  # the frame header version the proxy speaks
+
+[identity]
+keys = ["host", "port"]             # launch options that select the process; absent: the caller's key, as given
+must_match = ["username", "password"]   # remotes that share a process must agree on these
+
+[identity.normalize]                # only these: "lowercase", "strip", { default = <value> }
+host = ["strip", "lowercase"]
+port = [{ default = 1883 }]
+
+[environment]                       # added to the process environment
+MQTT_LOG = "info"
+
+[self_test]                         # optional: a command that exits non-zero if the binary is not what it claims
+command = ["{manifest_dir}/bin/mqtt-proxy", "--self-test"]
+```
+
+The manager runs `command` with `{python}` replaced by its interpreter (the remote one behind an SSH prefix) and
+`{manifest_dir}` by the manifest's directory, then appends the standard options of §1 and the protocol-specific launch
+options as `--name value`. The process key is `(name, *normalised identity options)` when `keys` is given, else the
+caller's key unchanged; two remotes with the same key share a process, and a remote whose `must_match` options differ
+from the first remote's is refused. Discovery: the directories in `PROTOCOL_PROXY_MANIFESTS` (`os.pathsep`-separated;
+`<name>.toml` or `<name>/proxy.toml`, first match wins), then, for manifests shipped as Python package data, the
+`protocol_proxy.manifests` entry points whose value is `package.module:filename`. The Python manager no longer imports
+`protocol_proxy.protocol.<name>` to find a proxy; a proxy class in the same environment can still be given directly,
+which yields an equivalent in-memory manifest.
+
 ## 2. Transport
 
 TCP on `AF_INET`. Both ends listen: the manager on `--manager-address:--manager-port`, the proxy on

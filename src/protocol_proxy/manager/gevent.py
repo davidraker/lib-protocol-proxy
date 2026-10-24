@@ -18,7 +18,7 @@ _log = logging.getLogger(__name__)
 
 
 class GeventProtocolProxyManager(ProtocolProxyManager, GeventIPCConnector, ABC):
-    def __init__(self, proxy_class: Type[ProtocolProxy], **kwargs):
+    def __init__(self, proxy_class: Type[ProtocolProxy] | None = None, **kwargs):
         super().__init__(proxy_class=proxy_class, **kwargs)
         self._heartbeat: Greenlet | None = None
 
@@ -93,11 +93,11 @@ class GeventProtocolProxyManager(ProtocolProxyManager, GeventIPCConnector, ABC):
         this proxy id) so the next get_proxy relaunches, and tell the listeners so they can re-register."""
         returncode = peer.process.wait()
         if self.peers.get(proxy_id) is peer:
-            _log.warning(f'PPM: {self.proxy_class.__name__} process {peer.process.pid} (proxy {proxy_id}) exited with'
+            _log.warning(f'PPM: {self.manifest.name} process {peer.process.pid} (proxy {proxy_id}) exited with'
                          f' code {returncode}. It will be relaunched on the next request for it.')
             self._lose_peer(peer, f'process exited with code {returncode}')
         else:
-            _log.debug(f'PPM: {self.proxy_class.__name__} process {peer.process.pid} (proxy {proxy_id}) exited with'
+            _log.debug(f'PPM: {self.manifest.name} process {peer.process.pid} (proxy {proxy_id}) exited with'
                        f' code {returncode} after its peer was already replaced or removed.')
 
     def get_proxy(self, unique_remote_id: tuple, **kwargs) -> ProtocolProxyPeer:
@@ -159,13 +159,13 @@ class GeventProtocolProxyManager(ProtocolProxyManager, GeventIPCConnector, ABC):
         if process.poll() is None:
             self.stopping_pids.add(process.pid)
             try:
-                _log.info(f'Terminating {self.proxy_class.__name__} with PID: {process.pid}')
+                _log.info(f'Terminating {self.manifest.name} with PID: {process.pid}')
                 process.terminate()
                 if process.wait(timeout=timeout) is None:
-                    _log.info(f'Killing {self.proxy_class.__name__} with PID: {process.pid}')
+                    _log.info(f'Killing {self.manifest.name} with PID: {process.pid}')
                     process.kill()
                     if process.wait(timeout=timeout) is None:
-                        _log.warning(f'Failed to stop {self.proxy_class.__name__} with PID: {process.pid}')
+                        _log.warning(f'Failed to stop {self.manifest.name} with PID: {process.pid}')
             except Timeout:
                 process.kill()
             except Exception as e:

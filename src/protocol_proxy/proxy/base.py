@@ -199,13 +199,6 @@ class ProtocolProxy(IPCConnector, metaclass=abc.ABCMeta):
     def get_local_socket_params(self) -> SocketParams:
         pass
 
-    @classmethod
-    @abc.abstractmethod
-    def get_unique_remote_id(cls, unique_remote_id: tuple) -> tuple:
-        """Get a unique identifier for the proxy server
-         given a unique_remote_id and protocol-specific set of parameters."""
-        pass
-
     @abc.abstractmethod
     def send_registration(self, remote: ProtocolProxyPeer) -> ProtocolProxyMessage:
         """Send a registration message to the remote manager."""

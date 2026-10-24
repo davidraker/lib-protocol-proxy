@@ -18,15 +18,11 @@ from protocol_proxy.proxy.gevent import GeventProtocolProxy
 
 
 class GeventDummy(GeventProtocolProxy):
-    @classmethod
-    def get_unique_remote_id(cls, unique_remote_id):
-        return unique_remote_id
+    pass
 
 
 class AsyncioDummy(AsyncioProtocolProxy):
-    @classmethod
-    def get_unique_remote_id(cls, unique_remote_id):
-        return unique_remote_id
+    pass
 
 
 def gevent_proxy():

@@ -40,6 +40,14 @@ for contributing to this and/or other VOLTTRON repositories.
 
 [//]: # (in your VOLTTRON agent or other applications.)
 
+# Manifests
+
+Each proxy ships a `proxy.toml` beside its code (`src/protocol_proxy/protocol/<name>/proxy.toml` for the Python
+proxies, registered through a `protocol_proxy.manifests` entry point) telling a manager how to launch it and which
+launch options identify a process. `GeventProtocolProxyManager.get_manager('mqtt')` finds the manifest; nothing is
+imported by name any more. Set `PROTOCOL_PROXY_MANIFESTS` to a directory of manifests for proxies that are not Python
+packages. The format is in PROTOCOL.md, "Manifests".
+
 # Process supervision
 
 A `ProtocolProxyManager` launches one proxy process per proxy key and watches it. When a proxy process exits, the

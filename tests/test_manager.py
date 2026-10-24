@@ -17,9 +17,7 @@ from protocol_proxy.proxy.gevent import GeventProtocolProxy
 
 
 class DummyProxy(GeventProtocolProxy):
-    @classmethod
-    def get_unique_remote_id(cls, unique_remote_id):
-        return unique_remote_id
+    pass
 
 
 def test_command_line_skips_none_and_manager_only_kwargs():

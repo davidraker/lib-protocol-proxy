@@ -5,7 +5,6 @@ import sys
 import time
 
 from abc import abstractmethod, ABC
-from importlib import import_module
 from inspect import ismethod
 from typing import Callable, Iterable, Type, TypeVar
 from uuid import uuid4, UUID
@@ -13,6 +12,7 @@ from weakref import WeakMethod, WeakValueDictionary
 
 from ..ipc import IPCConnector, ProtocolHeaders, ProtocolProxyMessage, ProtocolProxyPeer, SocketParams
 from ..logs import LAUNCHED_BY_MANAGER_ENV, handle_log_batch, log_entries, proxy_logger_name
+from ..manifest import Manifest, find as find_manifest
 from ..tls import Authority, TlsMaterial
 from ..proxy import ProtocolProxy
 from ..proxy.launch import str2bool
@@ -25,16 +25,23 @@ Self = TypeVar("Self", bound="ProtocolProxyManager")  # TODO: Deprecated by typi
 class ProtocolProxyManager(IPCConnector, ABC):
     managers = WeakValueDictionary()
 
-    def __init__(self, *, proxy_class: Type[ProtocolProxy], proxy_name: str = 'Manager',
-                 heartbeat_interval: float = 10.0, heartbeat_timeout: float = 5.0, heartbeat_misses: int = 3,
-                 ipc_tls: bool = False, **kwargs):
+    def __init__(self, *, manifest: Manifest | None = None, proxy_class: Type[ProtocolProxy] | None = None,
+                 proxy_name: str = 'Manager', heartbeat_interval: float = 10.0, heartbeat_timeout: float = 5.0,
+                 heartbeat_misses: int = 3, ipc_tls: bool = False, **kwargs):
+        if manifest is None:
+            if proxy_class is None:
+                raise ValueError('A manager needs a Manifest (or, for a Python proxy in this environment, its class).')
+            manifest = Manifest.for_proxy_class(proxy_class)
+        #: What this manager launches and how it keys the processes: see protocol_proxy.manifest.
+        self.manifest: Manifest = manifest
         self.unique_ids = {}
+        # The launch options the first remote of each process gave for the manifest's must_match keys.
+        self.shared_options: dict[tuple, dict] = {}
         # TLS toward launched proxies: this manager is the certificate authority (created with the first TLS proxy)
         # and issues itself and each TLS proxy a certificate; ``ipc_tls`` here makes it the default for every proxy.
         self.tls_default: bool = ipc_tls
         self.authority: Authority | None = None
         super().__init__(proxy_id=self.get_proxy_id('proxy_manager'), proxy_name=proxy_name, token=uuid4(), **kwargs)
-        self.proxy_class = proxy_class
         # Heartbeat: PING every registered peer each interval; a peer that misses ``heartbeat_misses`` replies in a
         # row is lost (same path as a process exit). 0 disables. The flavour's loop starts with the first get_proxy.
         self.heartbeat_interval = heartbeat_interval
@@ -74,15 +81,16 @@ class ProtocolProxyManager(IPCConnector, ABC):
         """
 
     def _setup_proxy_process_command(self, unique_remote_id: tuple, **kwargs) -> tuple:
-        #_log.debug(f'@@@@@@@@@ PASSED UAI is: {unique_remote_id}')
-        unique_remote_id = self.proxy_class.get_unique_remote_id(unique_remote_id)
-        #_log.debug(f'@@@@@@@@@ UAI AFTER LOOKUP is: {unique_remote_id}')
-        proxy_id = self.get_proxy_id(unique_remote_id)
-        #_log.debug('@@@@@@@@@ PROXY ID is: {}'.format(proxy_id))
-        proxy_name = str(unique_remote_id)
+        key = self.manifest.process_key(unique_remote_id, kwargs)
+        if (first := self.shared_options.get(key)) is not None:
+            if conflicts := self.manifest.identity.conflicts(first, kwargs):
+                raise ValueError(f'Remote {unique_remote_id} would share proxy process {key} but differs in '
+                                 f'{", ".join(conflicts)}, which the {self.manifest.name} manifest requires to match.')
+        else:
+            self.shared_options[key] = {k: kwargs.get(k) for k in self.manifest.identity.must_match}
+        proxy_id = self.get_proxy_id(key)
+        proxy_name = str(key)
         if proxy_id not in self.peers:
-            #_log.debug(f'@@@@@@@@@ PROXY_ID IS NOT IN PEERS. SETTING UP COMMAND.')
-            module, func = self.proxy_class.__module__, self.proxy_class.__name__
             prefix, python, _ = self.launcher_prefix(kwargs)
             if prefix and kwargs.get('ssh_forward', True) and 'manager_address' not in kwargs:
                 kwargs = {**kwargs, 'manager_address': '127.0.0.1'}      # the forwarded port on the proxy's host
@@ -95,17 +103,16 @@ class ProtocolProxyManager(IPCConnector, ABC):
                 kwargs.setdefault('cipher', self.cipher)    # one choice for both ends unless the caller says otherwise
             if self.tls_default:
                 kwargs.setdefault('ipc_tls', True)      # and the TLS material after it
-            # Launched through the generic entry point so the proxy module is imported exactly once (see launch.main).
-            entry_options = ['--gevent'] if getattr(self.proxy_class, 'PATCH_GEVENT', False) else []
             manager_address = kwargs.pop('manager_address', self.inbound_params.address)
             protocol_specific_params = [i for pair in [(f"--{k.replace('_', '-')}", str(v))
                                                        for k, v in kwargs.items()] for i in pair]
-            command = [*prefix, python, '-m', 'protocol_proxy.proxy', *entry_options, f'{module}:{func}',
+            # The manifest's command (its {python} is this interpreter, or the remote one behind an SSH prefix),
+            # then the standard options every proxy takes, then the protocol-specific launch options.
+            command = [*prefix, *self.manifest.launch_command(python, [
                        '--proxy-id', proxy_id.hex, '--proxy-name', proxy_name,
                        '--manager-id', self.proxy_id.hex, '--manager-address', str(manager_address),
-                       '--manager-port', str(self.inbound_params.port), *protocol_specific_params]
+                       '--manager-port', str(self.inbound_params.port), *protocol_specific_params])]
         else:
-            #_log.debug(f'@@@@@@@@@ PROXY_ID IS IN PEERS. NOT SETTING UP COMMAND.')
             command = None
         return command, proxy_id, proxy_name
 
@@ -127,7 +134,7 @@ class ProtocolProxyManager(IPCConnector, ABC):
             try:
                 manager = cls.get_manager(likely_module, kwargs.pop('manager_callbacks', None))
                 return manager, manager.get_proxy(unique_remote_id, **kwargs)
-            except (ImportError, ValueError) as e:
+            except (LookupError, ValueError) as e:
                 _log.warning(f'Unable to find a manager for get_proxy call: {e}')
         return None
 
@@ -234,36 +241,35 @@ class ProtocolProxyManager(IPCConnector, ABC):
                                                     response_expected=True))
 
     @classmethod
-    def get_manager(cls, proxy_class: Type[ProtocolProxy] | str,
+    def get_manager(cls, proxy: Manifest | Type[ProtocolProxy] | str,
                     manager_callbacks: Iterable[tuple[Callable, str]] = None) -> Self:
-        """Get or create a ProtocolProxyManager for the specified proxy class.
-            If a string is passed, it will attempt to import the class from the
-            protocol_proxy.protocol.<name> module.
-           :raises: ValueError | ImportError
+        """Get or create the ProtocolProxyManager for a proxy: by its manifest, by name (the manifest is found through
+        protocol_proxy.manifest: the PROTOCOL_PROXY_MANIFESTS directories, then the protocol_proxy.manifests entry
+        points), or, for a Python proxy class in this environment, by the class itself.
+           :raises: LookupError (no manifest of that name) | ValueError
         """
-        if isinstance(proxy_class, str):
-            try:
-                module = import_module('protocol_proxy.protocol.' + proxy_class)
-                if hasattr(module, 'PROXY_CLASS'):
-                    proxy_class = module.PROXY_CLASS
-            except ImportError as e:
-                raise ImportError(f'Failed to import proxy class "{proxy_class}": {e}')
-        if not isinstance(proxy_class, type) or not issubclass(proxy_class, ProtocolProxy):
-            raise ValueError(f'Unable to find the specified ProtocolProxy subclass, got {proxy_class}.')
-
-        if proxy_class.__name__ in cls.managers:
-            manager = cls.managers[proxy_class.__name__]
+        if isinstance(proxy, str):
+            manifest = find_manifest(proxy)
+        elif isinstance(proxy, Manifest):
+            manifest = proxy
+        elif isinstance(proxy, type) and issubclass(proxy, ProtocolProxy):
+            manifest = Manifest.for_proxy_class(proxy)
         else:
-            _log.info(f'Creating manager of class "{cls.__name__}" for new proxies of class: ({proxy_class.__name__}).')
-            manager = cls(proxy_class=proxy_class)
+            raise ValueError(f'Expected a Manifest, a proxy name or a ProtocolProxy subclass, got {proxy!r}.')
+
+        if manifest.name in cls.managers:
+            manager = cls.managers[manifest.name]
+        else:
+            _log.info(f'Creating manager of class "{cls.__name__}" for new proxies of {manifest.name}.')
+            manager = cls(manifest=manifest)
             for callback in manager_callbacks or []:
                 if not callable(callback[0]) or not isinstance(callback[1], str):
                     _log.warning(f'Attempted to register invalid callback for'
-                                 f' ProtocolProxyManager[{proxy_class.__name__}]: {callback}.'
+                                 f' ProtocolProxyManager[{manifest.name}]: {callback}.'
                                  ' Callback parameters must be (Callable, str)')
                     continue
                 manager.register_callback(*callback)
-            cls.managers[proxy_class.__name__] = manager
+            cls.managers[manifest.name] = manager
         return manager
 
     @classmethod
@@ -344,12 +350,12 @@ class ProtocolProxyManager(IPCConnector, ABC):
         """The logger a launched proxy's records are handled through in this process:
         ``protocol_proxy.proxies.<ProxyClass>.<proxy name>``. Its effective level gates the records and is passed
         to the proxy as ``--log-level``, so operators tune a proxy like any other logger."""
-        return logging.getLogger(proxy_logger_name(self.proxy_class.__name__, proxy_name))
+        return logging.getLogger(proxy_logger_name(self.manifest.name, proxy_name))
 
-    @staticmethod
-    def proxy_environment() -> dict[str, str]:
-        """Environment for a launched proxy: the manager's, plus the marker that selects the JSON log channel."""
-        return {**os.environ, LAUNCHED_BY_MANAGER_ENV: '1'}
+    def proxy_environment(self) -> dict[str, str]:
+        """Environment for a launched proxy: the manager's, the manifest's, and the marker that selects the JSON log
+        channel."""
+        return {**os.environ, **self.manifest.environment, LAUNCHED_BY_MANAGER_ENV: '1'}
 
     def log_subprocess_output(self, stream, logger: logging.Logger, stream_name: str = 'stderr',
                               pid: int | None = None, process_name: str | None = None):

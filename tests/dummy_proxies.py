@@ -14,9 +14,6 @@ _log = logging.getLogger(__name__)
 class GeventDummy(GeventProtocolProxy):
     LAUNCHER = 'launch_gevent_dummy'
 
-    @classmethod
-    def get_unique_remote_id(cls, unique_remote_id):
-        return unique_remote_id
 
     def main_loop(self):
         n = 0
@@ -32,9 +29,6 @@ def launch_gevent_dummy(parser):
 
 
 class AsyncioDummy(AsyncioProtocolProxy):
-    @classmethod
-    def get_unique_remote_id(cls, unique_remote_id):
-        return unique_remote_id
 
     async def _ticker(self):
         n = 0
