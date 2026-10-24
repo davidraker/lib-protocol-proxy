@@ -257,17 +257,76 @@ Collected from the first three ports (Go, C, Julia), each of which had to take t
 - The LOG queue (§9) holds 2000 records, admits 50 per second with a burst of 200, flushes every 0.2 s or 64 records,
   is used only when launched by a manager with stderr a pipe, and is drained to stderr at exit. A proxy whose orderly
   stop has not finished 15 s after it began exits hard with code 1.
+- The exit drain does not try the socket first: the queue's records go to stderr as JSON lines, followed by one WARNING
+  record with the number dropped over the proxy's life, if any. A LOG frame defers to ordinary frames waiting on the
+  same connection (§9); the reference waits as long as that takes, a port may cap the wait (Go and C: 500 ms).
+- The reference advertises `log` unconditionally. A port may omit it when it will not send batches (run by hand, or
+  `--socket-logging false`); the manager reads the pipes either way, so both are conformant.
+- A proxy launched with `--ipc-tls true` may serve TLS only on its inbound port; it is the manager's listener that
+  tells plain and TLS connections apart (§11b). A port must own SIGTERM itself: a runtime that consumes the signal on
+  an internal thread (Julia with its default signal handling) exits by the signal's default action, code -15 to the
+  manager, instead of 0.
+- A persistent TLS connection is read by one thread and written by another. OpenSSL (and mbedTLS) forbid concurrent
+  calls into one session, so a port on such a library serialises every call per session and releases the lock while
+  it waits on the socket (C). Go's `tls.Conn` allows one concurrent reader and writer; a single-threaded Task model
+  (Julia) never makes concurrent calls. Without this the reader sees a spurious EOF around the server's
+  NewSessionTicket records, which arrive exactly when the proxy writes `REGISTER_PEER`.
 - Exit code 0 on SIGTERM or a lost parent even before registration; 1 when registration fails.
+
+## 11b. Manager behaviours the sections above leave implicit (2026-10-24)
+
+Collected from the first manager port (Go), which had to take these from the Python reference:
+
+- The handshake on the proxy's stdin is one write, then close: the proxy token and the manager token as 32 hex
+  characters each, the 32-byte key as 64 hex characters only with `--encrypt true`, the TLS material line only with
+  `--ipc-tls true`, no separators.
+- A manager always passes `--proxy-id`, `--proxy-name`, `--manager-id`, `--manager-address` (its inbound address, or
+  `127.0.0.1` behind an SSH reverse forward) and `--manager-port`, then `--log-level` at the level it handles that
+  proxy's records; `--encrypt true` and `--cipher <its resolved cipher>` when it encrypts; `--ipc-tls true` when it
+  defaults to TLS; `--persistent` only when the caller gave it, and its own policy toward that proxy mirrors the value.
+  `manager_dials` makes the manager's side persistent. Every other launch option travels as `--name value`.
+- The peer (a fresh token, and a fresh key when encrypting) exists in the manager's connector before the process is
+  started, so a concurrent request for the same key finds it; a relaunch gets a new token and key, but the proxy id for
+  a process key persists across relaunches. The proxy name is the process key as a Python tuple repr; TOML integers in
+  the key render as Python ints. The manager-side logger is `protocol_proxy.proxies.<manifest name>.<proxy name>` with
+  the name reduced to runs of `[A-Za-z0-9-]` joined by `_`.
+- The `REGISTER_PEER` reply advertises exactly `compress`, `aead-chacha20poly1305` and `aead-aes256gcm`; a
+  registration without `address` and `port`, or from an unknown sender, is answered with plain `false`.
+- With `manager_dials`, the manager dials `dial` or `inbound_address:inbound_port` on a persistent connection and sends
+  `PING` every second until `REGISTER_PEER` arrives on that connection.
+- Liveness (§10) pings only registered proxies whose process is alive and not being terminated; any reply resets the
+  miss count. Peer states are launching, registered, healthy, unhealthy and lost; a registration wait that times out
+  loses the proxy the same way a process exit does.
+- Pipe records (§9): a line is a record only if it is a JSON object with a `msg` key; the proxy's own logger name
+  becomes the record's remote name and the channel (`stdout`, `stderr`, `socket`) is kept on the record.
+- Stop order: close the manager's listener and connections, then SIGTERM every running proxy and SIGKILL after 5 s;
+  the pipe readers run to EOF regardless. A proxy owns SIGTERM only once its runtime has armed the handler, which for
+  an interpreted port can be a second or more after launch; a manager that must guarantee exit code 0 waits for
+  registration before stopping a proxy (the conformance checks do).
+- `get_proxy` options the manager consumes rather than forwards: `manager_callbacks`, `dial`, `ssh_host`,
+  `ssh_options`, `ssh_forward`, `remote_python`, `remote_env`; `manager_address` is set by the manager, not the caller.
+  A proxy's exit by signal is reported as the negative signal number (`-15` after SIGTERM), as Python's `Popen` does.
+- A relaunch replaces the peer (new token and key, same id) atomically with respect to concurrent `get_proxy` calls:
+  the old peer is unlinked from the connector before or in the same critical section as the new one is added, so no
+  caller can adopt the stale token. The feature list in a registration is stored verbatim and consulted for every
+  later compression and cipher decision toward that proxy.
+- The manager's listener serves plain and TLS connections on one port, told apart by the first byte (0x16 is a TLS
+  record). Its CA is EC P-256, valid 366 days from 5 minutes before issue, path length 0; leaves carry the common name
+  as a DNS SAN (the manager's own also its inbound address as an IP SAN) and both server and client extended key usage.
 
 ## 12. Conformance (2026-10-24)
 
 `protocol-proxy-conformance <manifest.toml | name> [--echo METHOD] [--tls] [--manager-dials] [--option name=value]`
 launches the proxy a manifest describes through the Python manager and checks the contract above: registration with a
 feature list; the `PING` reply's shape; the error reply for an unknown method; `SET_LOG_LEVEL` when advertised; a
-version 1 header; per-message and persistent connections, including a frame above the persistent threshold; encryption
+`LOG` batch over the socket within 3 s when `log` is advertised (the proxy's logger is held at INFO for the run, so
+its switch to the socket and `SET_LOG_LEVEL`'s confirmation are records it must ship); a version 1 header; per-message and persistent connections, including a frame above the persistent threshold; encryption
 with each AEAD the proxy advertises, with a 64 KiB payload so compression and encryption combine; TLS and
 manager-initiated registration when requested; and exit code 0 on SIGTERM. A method that replies with its payload
 (`--echo`) lets the payload checks run; without one they are skipped. A port is expected to pass every check that is
 not skipped. The Python proxies pass (`tests/test_conformance.py`); the gevent and asyncio test dummies pass with every
-option, which is the reference a port is measured against. Ports that pass as of 2026-10-24: Go (25 of 25, TLS and
-manager-dials included), C (25 of 25), Julia (22 of 22, TLS not implemented).
+option, which is the reference a port is measured against. Each port carries the same harness on its own manager
+(`protocol-proxy-{go,c,julia}/bin/conformance`, same check names, text and JSON reports, `--python` for `{python}`),
+so a proxy is checked against four managers and a manager against every proxy. As of 2026-10-24 (26 checks with
+`--echo`, `--tls` and `--manager-dials`): the Go, C and Julia echo proxies and the gevent and asyncio Python dummies
+pass 26 of 26 under each of the Python, Go, C and Julia managers.

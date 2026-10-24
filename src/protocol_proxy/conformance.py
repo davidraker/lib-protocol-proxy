@@ -3,8 +3,9 @@
 The proxy under test is whatever a manifest launches (:mod:`protocol_proxy.manifest`), in any language. Each check
 launches it through a real :class:`GeventProtocolProxyManager` with one combination of options and exercises the core
 contract: registration with its feature list, PING, the error reply for an unknown method, SET_LOG_LEVEL when
-advertised, header version 1, per-message and persistent connections, encryption with each AEAD the proxy advertises,
-optionally TLS and manager-initiated registration, and a clean exit on SIGTERM. An ``echo`` method, if the proxy has
+advertised, a LOG batch over the socket when advertised, header version 1, per-message and persistent connections,
+encryption with each AEAD the proxy advertises, optionally TLS and manager-initiated registration, and a clean exit on
+SIGTERM. An ``echo`` method, if the proxy has
 one, is used to round-trip payloads large enough to be compressed.
 
 Run it from the command line (``protocol-proxy-conformance``) against a manifest file or a proxy name, or call
@@ -28,6 +29,9 @@ import gevent
 from .ipc import ProtocolProxyMessage, ProtocolProxyPeer
 from .manager.gevent import GeventProtocolProxyManager
 from .manifest import Manifest, find
+
+#: Seconds a proxy that advertises ``log`` has to deliver a record over the socket once it has something to say.
+LOG_BATCH_WAIT = 3.0
 
 _log = logging.getLogger(__name__)
 
@@ -75,8 +79,28 @@ class Report:
                 'checks': [{'name': c.name, 'status': c.status, 'detail': c.detail} for c in self.checks]}
 
 
+class _RecordCapture(logging.Handler):
+    """Keeps every record the manager handles for the proxy under test, and still shows the ones the root logger
+    would have shown (the proxy's logger is set to INFO and stops propagating while a session runs, so that INFO
+    records are handled without appearing on the console of a quiet run)."""
+
+    def __init__(self):
+        super().__init__(logging.NOTSET)
+        self.records: list[logging.LogRecord] = []
+
+    def emit(self, record: logging.LogRecord):
+        self.records.append(record)
+        if logging.getLogger().isEnabledFor(record.levelno):
+            logging.getLogger().handle(record)
+
+    def by_channel(self, channel: str) -> list[logging.LogRecord]:
+        return [r for r in self.records if getattr(r, 'channel', None) == channel]
+
+
 class Session:
     """One launched proxy under one manager configuration."""
+
+    REMOTE_ID = ('conformance',)
 
     def __init__(self, manifest: Manifest, manager_options: dict, launch_options: dict, timeout: float):
         self.manager = GeventProtocolProxyManager(manifest=manifest, heartbeat_interval=0, **manager_options)
@@ -84,13 +108,29 @@ class Session:
         self.timeout = timeout
         self.peer: ProtocolProxyPeer | None = None
         self._loop = None
+        self.capture = _RecordCapture()
+        proxy_name = str(manifest.process_key(self.REMOTE_ID, launch_options))
+        self._logger = self.manager.proxy_logger(proxy_name)
+        self._logger_state = (self._logger.level, self._logger.propagate)
 
     def __enter__(self) -> 'Session':
+        # INFO records (the switch to socket logging, SET_LOG_LEVEL's confirmation) must reach the capture, and the
+        # level also travels to the proxy as --log-level; the capture forwards what the console would have shown.
+        self._logger.setLevel(logging.INFO)
+        self._logger.propagate = False
+        self._logger.addHandler(self.capture)
         self.manager.start()
         self._loop = gevent.spawn(self.manager.select_loop)
-        self.peer = self.manager.get_proxy(('conformance',), **self.launch_options)
+        self.peer = self.manager.get_proxy(self.REMOTE_ID, **self.launch_options)
         self.manager.wait_peer_registered(self.peer, self.timeout)
         return self
+
+    def wait_for_records(self, channel: str, timeout: float = LOG_BATCH_WAIT) -> list[logging.LogRecord]:
+        """Records that arrived by ``channel`` ('socket' or 'stderr'), waiting up to ``timeout`` for the first."""
+        deadline = time.monotonic() + timeout
+        while not (found := self.capture.by_channel(channel)) and time.monotonic() < deadline:
+            gevent.sleep(0.05)
+        return found
 
     @property
     def registered(self) -> bool:
@@ -134,6 +174,9 @@ class Session:
                     self.peer.process.kill()
         if self._loop is not None:
             self._loop.kill(block=False)
+        self._logger.removeHandler(self.capture)
+        self._logger.setLevel(self._logger_state[0])
+        self._logger.propagate = self._logger_state[1]
 
 
 def run(manifest: Manifest, *, launch_options: dict | None = None, echo_method: str | None = None,
@@ -184,6 +227,16 @@ def run(manifest: Manifest, *, launch_options: dict | None = None, echo_method: 
                 report.add('SET_LOG_LEVEL', False, f'{type(e).__name__}: {e}')
         else:
             report.skip('SET_LOG_LEVEL', 'not advertised')
+        if 'log' in s.peer.features:
+            # The proxy has had something to say since it registered (its switch to the socket, SET_LOG_LEVEL's
+            # confirmation), so a batch must have been shipped by now or very soon.
+            records = s.wait_for_records('socket')
+            detail = (f'{len(records)} record(s), first: {records[0].getMessage()!r}' if records
+                      else f'no record over the socket within {LOG_BATCH_WAIT}s'
+                           f' ({len(s.capture.by_channel("stderr"))} by stderr)')
+            report.add('LOG batch over the socket', bool(records), detail)
+        else:
+            report.skip('LOG batch over the socket', 'not advertised')
         try:
             health = s.request_json('PING', protocol_version=1)
             report.add('header version 1 accepted', isinstance(health, dict) and 'uptime' in health, f'{health}')

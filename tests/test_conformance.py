@@ -21,6 +21,7 @@ def test_dummies_pass_every_check(proxy_class):
     report = run(Manifest.for_proxy_class(proxy_class), echo_method='ECHO', tls=True, manager_dials=True, timeout=20)
     assert report.ok, report.text()
     assert not any(c.skipped and 'not requested' in c.detail for c in report.checks)
+    assert not any(c.skipped and c.detail == 'not advertised' for c in report.checks), report.text()
     assert any(c.name.startswith('encrypted (aes-256-gcm)') for c in report.checks), report.text()
 
 
