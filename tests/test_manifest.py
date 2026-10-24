@@ -4,6 +4,7 @@ import textwrap
 
 import pytest
 
+from pathlib import Path
 from protocol_proxy.manifest import (ENV_MANIFEST_PATH, Identity, Manifest, ManifestError, discover, find, locate,
                                      search_path)
 from dummy_proxies import AsyncioDummy, GeventDummy
@@ -101,7 +102,7 @@ def test_discovery_searches_the_configured_directories(tmp_path, monkeypatch):
     (tmp_path / 'a' / 'mqtt.toml').write_text(MQTT)
     (tmp_path / 'b' / 'dnp3' / 'proxy.toml').write_text(SINGLETON)
     monkeypatch.setenv(ENV_MANIFEST_PATH, os.pathsep.join([str(tmp_path / 'a'), str(tmp_path / 'b')]))
-    assert search_path() == [tmp_path / 'a', tmp_path / 'b']
+    assert search_path()[:2] == [tmp_path / 'a', tmp_path / 'b']     # the variable comes first; defaults follow
     assert locate('mqtt') == tmp_path / 'a' / 'mqtt.toml'
     assert find('dnp3').command[-1].endswith(':Dnp3Proxy')
     assert {'mqtt', 'dnp3'} <= set(discover())
@@ -115,3 +116,49 @@ def test_first_directory_wins_over_later_ones(tmp_path, monkeypatch):
         (tmp_path / d / 'p.toml').write_text(f'[proxy]\nname = "p"\ncommand = ["{name}"]\n')
     monkeypatch.setenv(ENV_MANIFEST_PATH, os.pathsep.join([str(tmp_path / 'a'), str(tmp_path / 'b')]))
     assert find('p').command == ('first',)
+
+
+def test_default_search_path_order_and_the_variable_prepends(tmp_path, monkeypatch):
+    import sys
+    from protocol_proxy.manifest import MANIFEST_SUBDIR, environment_directory
+    monkeypatch.setenv('HOME', str(tmp_path / 'home'))
+    monkeypatch.delenv('XDG_CONFIG_HOME', raising=False); monkeypatch.delenv('XDG_CONFIG_DIRS', raising=False)
+    monkeypatch.delenv('XDG_DATA_DIRS', raising=False); monkeypatch.delenv(ENV_MANIFEST_PATH, raising=False)
+    monkeypatch.setattr(sys, 'prefix', str(tmp_path / 'venv'))
+    assert search_path() == [tmp_path / 'home' / '.config' / MANIFEST_SUBDIR, tmp_path / 'venv' / 'share' / MANIFEST_SUBDIR,
+                             Path('/etc') / MANIFEST_SUBDIR, Path('/usr/local/share') / MANIFEST_SUBDIR, Path('/usr/share') / MANIFEST_SUBDIR]
+    assert environment_directory() == tmp_path / 'venv' / 'share' / MANIFEST_SUBDIR
+    monkeypatch.setenv(ENV_MANIFEST_PATH, os.pathsep.join([str(tmp_path / 'dev'), str(tmp_path / 'home' / '.config' / MANIFEST_SUBDIR)]))
+    path = search_path()
+    assert path[0] == tmp_path / 'dev' and path.count(tmp_path / 'home' / '.config' / MANIFEST_SUBDIR) == 1
+
+
+def test_a_manifest_in_the_environment_directory_is_found_without_configuration(tmp_path, monkeypatch):
+    import sys
+    from protocol_proxy.manifest import environment_directory
+    monkeypatch.delenv(ENV_MANIFEST_PATH, raising=False)
+    monkeypatch.setattr(sys, 'prefix', str(tmp_path / 'venv'))
+    target = environment_directory(); target.mkdir(parents=True)
+    (target / 'dnp3.toml').write_text(SINGLETON)
+    assert locate('dnp3') == target / 'dnp3.toml'
+
+
+def test_export_copies_entry_point_manifests_with_the_package_directory_resolved(tmp_path, monkeypatch):
+    import protocol_proxy.manifest as m
+    pkg = tmp_path / 'pkg'; pkg.mkdir()
+    (pkg / 'proxy.toml').write_text('[proxy]\nname = "mms"\ncommand = ["{manifest_dir}/bin/mms-proxy"]\n')
+    monkeypatch.setattr(m, '_entry_point_manifests', lambda: {'mms': pkg / 'proxy.toml'})
+    written = m.export(tmp_path / 'out')
+    assert written == [tmp_path / 'out' / 'mms.toml']
+    copied = Manifest.load(written[0])
+    assert copied.command == (f'{pkg}/bin/mms-proxy',) and copied.launch_command('py') == [f'{pkg}/bin/mms-proxy']
+
+
+def test_cli_lists_paths_and_exports(tmp_path, monkeypatch, capsys):
+    import protocol_proxy.manifest as m
+    monkeypatch.setenv(ENV_MANIFEST_PATH, str(tmp_path / 'dev'))
+    (tmp_path / 'dev').mkdir(); (tmp_path / 'dev' / 'mqtt.toml').write_text(MQTT)
+    assert m.main(['path']) == 0 and str(tmp_path / 'dev') in capsys.readouterr().out
+    assert m.main(['list']) == 0 and 'mqtt' in capsys.readouterr().out
+    monkeypatch.setattr(m, '_entry_point_manifests', lambda: {'mqtt': tmp_path / 'dev' / 'mqtt.toml'})
+    assert m.main(['export', '--to', str(tmp_path / 'out')]) == 0 and (tmp_path / 'out' / 'mqtt.toml').is_file()

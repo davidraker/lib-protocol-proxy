@@ -45,8 +45,12 @@ for contributing to this and/or other VOLTTRON repositories.
 Each proxy ships a `proxy.toml` beside its code (`src/protocol_proxy/protocol/<name>/proxy.toml` for the Python
 proxies, registered through a `protocol_proxy.manifests` entry point) telling a manager how to launch it and which
 launch options identify a process. `GeventProtocolProxyManager.get_manager('mqtt')` finds the manifest; nothing is
-imported by name any more. Set `PROTOCOL_PROXY_MANIFESTS` to a directory of manifests for proxies that are not Python
-packages. The format is in PROTOCOL.md, "Manifests".
+imported by name any more. Manifests are searched for in `PROTOCOL_PROXY_MANIFESTS`, then `~/.config/protocol-proxy/
+manifests`, the environment's `share/protocol-proxy/manifests`, `/etc/protocol-proxy/manifests` and
+`/usr/share/protocol-proxy/manifests`; a proxy in another language is installed by dropping its manifest and binary
+into one of them. `protocol-proxy-manifests list` shows what a manager here would find, `path` the directories, and
+`export` copies the installed Python proxies' manifests into the environment's directory. The format is in
+PROTOCOL.md, "Manifests".
 
 # Process supervision
 

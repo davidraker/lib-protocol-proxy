@@ -39,6 +39,9 @@ classifiers = [
     "License :: OSI Approved :: Apache Software License"
 ]
 
+[tool.poetry.scripts]
+protocol-proxy-manifests = "protocol_proxy.manifest:main"
+
 [tool.poetry.dependencies]
 python = ">=3.10,<4.0"
 tomli = { version = "^2.0.1", python = "<3.11" }

@@ -70,11 +70,19 @@ The manager runs `command` with `{python}` replaced by its interpreter (the remo
 `{manifest_dir}` by the manifest's directory, then appends the standard options of §1 and the protocol-specific launch
 options as `--name value`. The process key is `(name, *normalised identity options)` when `keys` is given, else the
 caller's key unchanged; two remotes with the same key share a process, and a remote whose `must_match` options differ
-from the first remote's is refused. Discovery: the directories in `PROTOCOL_PROXY_MANIFESTS` (`os.pathsep`-separated;
-`<name>.toml` or `<name>/proxy.toml`, first match wins), then, for manifests shipped as Python package data, the
-`protocol_proxy.manifests` entry points whose value is `package.module:filename`. The Python manager no longer imports
-`protocol_proxy.protocol.<name>` to find a proxy; a proxy class in the same environment can still be given directly,
-which yields an equivalent in-memory manifest.
+from the first remote's is refused.
+
+**Discovery.** A manager searches directories for `<name>.toml` or `<name>/proxy.toml`, first match wins, in this
+order: the directories in `PROTOCOL_PROXY_MANIFESTS` (`os.pathsep`-separated; prepended, not replacing the rest), the
+user's `~/.config/protocol-proxy/manifests` (`XDG_CONFIG_HOME`), the environment's `<prefix>/share/protocol-proxy/
+manifests` (a Python venv's own, under `sys.prefix`), then the system's `/etc/protocol-proxy/manifests`
+(`XDG_CONFIG_DIRS`) and `/usr/local/share` and `/usr/share` `protocol-proxy/manifests` (`XDG_DATA_DIRS`). A proxy that
+is not a Python package is installed by placing its manifest, and the binary it names through `{manifest_dir}`, in one
+of them; no configuration is needed. Python proxies ship their manifest as package data under a
+`protocol_proxy.manifests` entry point (value `package.module:filename`); the Python manager reads those as a fallback
+after the directories, and `protocol-proxy-manifests export` copies them into the environment's directory for a manager
+that cannot read Python metadata. The Python manager no longer imports `protocol_proxy.protocol.<name>` to find a
+proxy; a proxy class in the same environment can still be given directly, which yields an equivalent in-memory manifest.
 
 ## 2. Transport
 

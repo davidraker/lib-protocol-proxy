@@ -26,10 +26,16 @@ on. Nothing in a manifest is executable: identity values may only be normalised 
     [self_test]                        # optional: exits non-zero if the binary is not what the manifest says
     command = ["{python}", "-m", "protocol_proxy.protocol.mqtt", "--self-test"]
 
-Discovery: directories named in the ``PROTOCOL_PROXY_MANIFESTS`` environment variable (``os.pathsep``-separated),
-holding ``<name>.toml`` or ``<name>/proxy.toml``, then ``protocol_proxy.manifests`` entry points whose value is
-``package.module:filename`` for manifests shipped as Python package data. A Python proxy class can also be described
-without a file through :meth:`Manifest.for_proxy_class`, which is how tests and in-process proxies get one.
+Discovery is a search path of directories holding ``<name>.toml`` or ``<name>/proxy.toml`` (:func:`search_path`):
+the ``PROTOCOL_PROXY_MANIFESTS`` environment variable (``os.pathsep``-separated) first, then the user's
+``~/.config/protocol-proxy/manifests``, the Python environment's ``<prefix>/share/protocol-proxy/manifests``, and the
+system's ``/etc/protocol-proxy/manifests`` and ``/usr/share/protocol-proxy/manifests`` (XDG variables respected). A
+manager in any language applies the same list. A proxy that is not a Python package is installed by dropping its
+manifest, and the binary it points at through ``{manifest_dir}``, into one of them. Python proxies ship theirs as
+package data under a ``protocol_proxy.manifests`` entry point (value ``package.module:filename``); the Python manager
+reads those as a fallback, and ``protocol-proxy-manifests export`` copies them into the environment's directory so a
+manager that cannot read entry points finds them too. A Python proxy class can also be described without a file
+through :meth:`Manifest.for_proxy_class`, which is how tests and in-process proxies get one.
 """
 from __future__ import annotations
 
@@ -50,6 +56,8 @@ except ModuleNotFoundError:     # Python 3.10
 
 MANIFEST_FILENAME = 'proxy.toml'
 ENV_MANIFEST_PATH = 'PROTOCOL_PROXY_MANIFESTS'
+#: Relative directory under a configuration or data root (``~/.config``, ``<prefix>/share``, ``/etc``, ``/usr/share``).
+MANIFEST_SUBDIR = Path('protocol-proxy') / 'manifests'
 ENTRY_POINT_GROUP = 'protocol_proxy.manifests'
 #: Placeholders a command may use; the manager resolves them at launch.
 PLACEHOLDERS = frozenset({'python', 'manifest_dir'})
@@ -163,10 +171,28 @@ class Manifest:
 
 
 # ---- discovery ------------------------------------------------------------------------------------------------------
+def environment_directory() -> Path:
+    """Where this Python environment keeps manifests: ``<sys.prefix>/share/protocol-proxy/manifests`` (a venv has its
+    own). ``protocol-proxy-manifests export`` writes here."""
+    return Path(sys.prefix) / 'share' / MANIFEST_SUBDIR
+
+
 def search_path() -> list[Path]:
-    """Directories searched for manifests, from ``PROTOCOL_PROXY_MANIFESTS``."""
+    """Directories searched for manifests, most specific first: ``PROTOCOL_PROXY_MANIFESTS`` (``os.pathsep``-separated,
+    prepended rather than replacing the rest), the user's configuration directory (``XDG_CONFIG_HOME`` or
+    ``~/.config``), this Python environment's share directory, then the system's configuration and data directories
+    (``XDG_CONFIG_DIRS`` or ``/etc``; ``XDG_DATA_DIRS`` or ``/usr/local/share:/usr/share``). Duplicates are dropped."""
     raw = os.environ.get(ENV_MANIFEST_PATH, '')
-    return [Path(p).expanduser() for p in raw.split(os.pathsep) if p]
+    dirs = [Path(p).expanduser() for p in raw.split(os.pathsep) if p]
+    dirs.append(Path(os.environ.get('XDG_CONFIG_HOME') or Path.home() / '.config') / MANIFEST_SUBDIR)
+    dirs.append(environment_directory())
+    dirs += [Path(p) / MANIFEST_SUBDIR for p in (os.environ.get('XDG_CONFIG_DIRS') or '/etc').split(os.pathsep) if p]
+    dirs += [Path(p) / MANIFEST_SUBDIR for p in (os.environ.get('XDG_DATA_DIRS') or '/usr/local/share:/usr/share').split(os.pathsep) if p]
+    unique: list[Path] = []
+    for d in dirs:
+        if d not in unique:
+            unique.append(d)
+    return unique
 
 
 def _entry_point_manifests() -> dict[str, Path]:
@@ -213,6 +239,51 @@ def discover() -> dict[str, Manifest]:
         if name not in manifests and path.is_file():
             manifests[name] = Manifest.load(path)
     return manifests
+
+
+def export(destination: Path | None = None) -> list[Path]:
+    """Copy the manifests of the installed Python proxies (their entry points) into ``destination``, by default this
+    environment's directory, as ``<name>.toml``, so a manager that cannot read Python entry points finds them.
+    ``{manifest_dir}`` in a copied manifest is resolved to the package directory it came from, so a command that
+    pointed beside the original still does. Returns the files written."""
+    destination = Path(destination) if destination else environment_directory()
+    destination.mkdir(parents=True, exist_ok=True)
+    written = []
+    for name, path in sorted(_entry_point_manifests().items()):
+        if not path.is_file():
+            continue
+        manifest = Manifest.load(path)          # validated before anything is written
+        text = path.read_text(encoding='utf-8').replace('{manifest_dir}', str(path.parent))
+        target = destination / f'{manifest.name}.toml'
+        target.write_text(text, encoding='utf-8')
+        written.append(target)
+    return written
+
+
+def main(argv: list[str] | None = None) -> int:
+    """``protocol-proxy-manifests``: ``list`` what a manager here would find and where, ``path`` the directories
+    searched, ``export [--to DIR]`` the installed Python proxies' manifests into a directory."""
+    import argparse
+    parser = argparse.ArgumentParser(prog='protocol-proxy-manifests', description=main.__doc__)
+    sub = parser.add_subparsers(dest='command', required=True)
+    sub.add_parser('list', help='manifests a manager finds, by name, with their locations')
+    sub.add_parser('path', help='the directories searched, in order')
+    exp = sub.add_parser('export', help="copy installed Python proxies' manifests into a directory")
+    exp.add_argument('--to', type=Path, default=None, help=f'destination (default: {environment_directory()})')
+    args = parser.parse_args(argv)
+    if args.command == 'path':
+        for directory in search_path():
+            print(f'{directory}{"" if directory.is_dir() else "   (absent)"}')
+    elif args.command == 'list':
+        found = discover()
+        if not found:
+            print('no manifests found')
+        for name, manifest in sorted(found.items()):
+            print(f'{name:16} {manifest.source or "(entry point)"}')
+    else:
+        for path in export(args.to):
+            print(path)
+    return 0
 
 
 # ---- validation helpers ---------------------------------------------------------------------------------------------
@@ -269,3 +340,7 @@ def _names(value: Any, where: str) -> tuple[str, ...]:
     if not isinstance(value, list) or any(not isinstance(v, str) or not v for v in value):
         raise ManifestError(f'{where}: must be a list of option names')
     return tuple(value)
+
+
+if __name__ == '__main__':
+    sys.exit(main())
