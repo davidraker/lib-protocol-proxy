@@ -235,6 +235,28 @@ keepalive on persistent connections are the cheaper first signals.
   life, and a port that never sends `LOG` is simply read from its pipes.
 - A port that implements only ChaCha20-Poly1305 omits `aead-aes256gcm` from its features and is never sent AES-GCM.
 
+## 11a. Behaviours a port needs that the sections above leave implicit (2026-10-24)
+
+Collected from the first three ports (Go, C, Julia), each of which had to take these from the Python reference:
+
+- `--cipher auto` chooses AES-256-GCM when `/proc/cpuinfo` lists the `aes` flag, else ChaCha20-Poly1305. The
+  registration frame is encrypted with the proxy's own choice (the manager's features are unknown until the reply) and
+  is never compressed, for the same reason; after the reply a cipher the manager did not advertise falls back to
+  ChaCha20-Poly1305.
+- `--compress-threshold 0` compresses every non-empty payload. The 256 KiB persistent-connection threshold (§2) is
+  compared against the frame as sealed (header and wire payload).
+- A reply travels on the connection the request arrived on, with the keep-alive bit only if that connection is
+  persistent, compressed and encrypted toward the sender as any frame would be.
+- An accepted connection that carries no frame for 30 s and was not adopted is closed. A handler that has not
+  answered after 30 s (the default) is answered with the §8 error reply `Operation timed out after N seconds`; the
+  other error texts are `Unknown method X` and `Method X provides no response`.
+- `SET_LOG_LEVEL` accepts level names case-insensitively, the aliases `WARN` and `FATAL`, and numeric levels. `PING`'s
+  `uptime` is seconds rounded to milliseconds; `last_activity` is ISO 8601 with `+00:00`.
+- The LOG queue (§9) holds 2000 records, admits 50 per second with a burst of 200, flushes every 0.2 s or 64 records,
+  is used only when launched by a manager with stderr a pipe, and is drained to stderr at exit. A proxy whose orderly
+  stop has not finished 15 s after it began exits hard with code 1.
+- Exit code 0 on SIGTERM or a lost parent even before registration; 1 when registration fails.
+
 ## 12. Conformance (2026-10-24)
 
 `protocol-proxy-conformance <manifest.toml | name> [--echo METHOD] [--tls] [--manager-dials] [--option name=value]`
@@ -245,4 +267,5 @@ with each AEAD the proxy advertises, with a 64 KiB payload so compression and en
 manager-initiated registration when requested; and exit code 0 on SIGTERM. A method that replies with its payload
 (`--echo`) lets the payload checks run; without one they are skipped. A port is expected to pass every check that is
 not skipped. The Python proxies pass (`tests/test_conformance.py`); the gevent and asyncio test dummies pass with every
-option, which is the reference a port is measured against.
+option, which is the reference a port is measured against. Ports that pass as of 2026-10-24: Go (25 of 25, TLS and
+manager-dials included), C (25 of 25), Julia (22 of 22, TLS not implemented).
