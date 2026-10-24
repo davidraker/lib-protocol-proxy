@@ -30,6 +30,7 @@ class AsyncioProtocolProxy(AsyncioIPCConnector, ProtocolProxy, ABC):
         self.registration_timeout = registration_timeout
         self.registered = False
         self._stopping = False
+        self._registration: asyncio.Future | None = None
         self._log_flusher: asyncio.Task | None = None
 
     def get_local_socket_params(self) -> SocketParams:
@@ -119,6 +120,8 @@ class AsyncioProtocolProxy(AsyncioIPCConnector, ProtocolProxy, ABC):
     async def stop(self):
         """Stop serving. A protocol overrides this to close its sessions and flush state first, then calls super."""
         self._stopping = True
+        if self._registration is not None and not self._registration.done():
+            self._registration.cancel()                 # a SIGTERM during the registration attempts: stop at once
         if self._log_flusher is not None:
             self._log_flusher.cancel()
             self._log_flusher = None
@@ -140,18 +143,34 @@ class AsyncioProtocolProxy(AsyncioIPCConnector, ProtocolProxy, ABC):
         self.loop.create_task(self.stop()).add_done_callback(stopped)
 
     async def start(self):
-        """Create the inbound server, register with the manager, then serve until stopped, terminated or orphaned."""
+        """Create the inbound server, register with the manager, then serve until stopped, terminated or orphaned.
+
+        The SIGTERM handler and the manager watchdog are in place before registration starts (PROTOCOL.md §11a: exit
+        code 0 on SIGTERM or a lost parent even before registration). Until 2026-10-24 both came after it, and a
+        SIGTERM in the milliseconds after the registration reply killed the process by the signal's default action."""
         self.guard_logging()
         await super(AsyncioProtocolProxy, self).start()
-        if not await self.send_registration(cast(AsyncioProtocolProxyPeer, self.peers[self.manager])):
-            raise RuntimeError(f'{self.proxy_name}: registration with the Proxy Manager failed.')
-        self.on_registered()
-        watchdog = asyncio.ensure_future(self._watch_manager())
         try:
             self.loop.add_signal_handler(signal.SIGTERM, self._on_terminate_signal, signal.SIGTERM)
         except (RuntimeError, ValueError, NotImplementedError) as e:     # not the main thread, or no loop support
             _log.debug(f'{self.proxy_name}: no SIGTERM handler installed: {e}')
+        watchdog = asyncio.ensure_future(self._watch_manager())
         try:
+            self._registration = asyncio.ensure_future(
+                self.send_registration(cast(AsyncioProtocolProxyPeer, self.peers[self.manager])))
+            try:
+                registered = await self._registration
+            except asyncio.CancelledError:
+                if not (self._stopping or self._manager_lost):
+                    raise
+                registered = False
+            if not registered:
+                if self._stopping or self._manager_lost:
+                    return                                   # stopped while registering: a clean exit
+                raise RuntimeError(f'{self.proxy_name}: registration with the Proxy Manager failed.')
+            self.on_registered()
+            if self._stopping or self._manager_lost:        # stop() has closed the server; serving would raise
+                return
             async with self.inbound_server:
                 await self.inbound_server.serve_forever()
         except asyncio.CancelledError:

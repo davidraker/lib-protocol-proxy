@@ -206,6 +206,30 @@ def test_asyncio_sigterm_stops_the_proxy_gracefully():
     asyncio.run(main())
 
 
+def test_asyncio_sigterm_during_registration_stops_the_proxy_gracefully():
+    """The handler is armed before registration: a SIGTERM while the attempts are still running (or in the moment
+    after the reply) stops the proxy with a normal return, not the signal's default action (found by the Go manager,
+    2026-10-24)."""
+    async def main():
+        p = AsyncioDummy(proxy_id=uuid4(), token=uuid4(), manager_address='127.0.0.1', manager_port=1,
+                         manager_id=uuid4(), manager_token=uuid4(), registration_retry_delay=30,
+                         registration_timeout=30, inbound_params=SocketParams('127.0.0.1', 0))
+        registering = asyncio.Event()
+
+        async def slow_registration(remote):
+            registering.set()
+            await asyncio.sleep(60)
+            return True
+        with mock.patch.object(p, 'send_registration', slow_registration):
+            serving = asyncio.ensure_future(p.start())
+            await asyncio.wait_for(registering.wait(), 2)
+            assert not serving.done()
+            os.kill(os.getpid(), signal.SIGTERM)
+            await asyncio.wait_for(serving, 2)          # returns, well before the 60 s attempt would have ended
+        assert p._stopping and not p.registered and not p.inbound_server.is_serving()
+    asyncio.run(main())
+
+
 def test_registration_reply_from_a_current_manager_records_its_features():
     p = gevent_proxy()
     manager_peer = p.peers[p.manager]
