@@ -216,9 +216,11 @@ def test_real_proxy_launched_with_encryption_exchanges_only_encrypted_frames(pro
             manager.wait_peer_registered(peer, 20)
             assert peer.socket_params is not None, 'encrypted proxy did not register'
             _wait(lambda: peer.state == 'healthy', what='an encrypted heartbeat reply')
+            # The dummy logs at INFO: a LOG batch has to be seen before the level goes to WARNING, after which it
+            # has nothing left to ship (the first heartbeat reply comes before the first flush).
+            _wait(lambda: any(r.channel == 'socket' for r in proxies_log), what='a LOG batch over the socket')
             reply = manager.set_proxy_log_level(peer, 'WARNING').get(timeout=5)
             assert json.loads(reply) == {'level': 'WARNING'}
-            _wait(lambda: any(r.channel == 'socket' for r in proxies_log), what='a LOG batch over the socket')
         assert opened.call_count >= 3 and all(call.args[0].encrypted for call in opened.call_args_list)
         assert all(call.args[0].aes_gcm for call in opened.call_args_list)       # the proxy followed --cipher
         manager._cleanup_proxy_process(peer.process)

@@ -173,9 +173,8 @@ class ProtocolProxy(IPCConnector, metaclass=abc.ABCMeta):
         """Guarantee the process ends: a plain thread (independent of gevent or asyncio) exits it after
         HARD_EXIT_GRACE seconds if the orderly stop has not. A proxy must never outlive its manager because its own
         shutdown raised or hung; two did on 2026-10-23 and spammed the next platform's reused ports for hours."""
-        if getattr(self, '_hard_exit_armed', False):
+        if getattr(self, '_hard_exit_timer', None) is not None:
             return
-        self._hard_exit_armed = True
 
         def hard_exit():
             _log.error(f'{self.proxy_name}: still running {self.HARD_EXIT_GRACE:g} s after {reason}; exiting now.')
@@ -186,6 +185,16 @@ class ProtocolProxy(IPCConnector, metaclass=abc.ABCMeta):
         timer = threading.Timer(self.HARD_EXIT_GRACE, hard_exit)
         timer.daemon = True
         timer.start()
+        self._hard_exit_timer = timer
+
+    def disarm_hard_exit(self):
+        """The orderly stop completed: the process no longer needs a forced exit. Called when ``run``/``start`` returns.
+        Without it the timer outlives a proxy that stopped in time; harmless in a proxy process about to exit, fatal
+        in a process that hosts the proxy for a while longer (a test runner)."""
+        timer = getattr(self, '_hard_exit_timer', None)
+        if timer is not None:
+            timer.cancel()
+            self._hard_exit_timer = None
 
     def on_manager_lost(self):
         """Called once, from the run loop, when the manager process has gone. The default logs and stops the proxy;

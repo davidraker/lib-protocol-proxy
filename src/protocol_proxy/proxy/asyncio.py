@@ -128,6 +128,7 @@ class AsyncioProtocolProxy(AsyncioIPCConnector, ProtocolProxy, ABC):
         self.stop_socket_logging()
         if self.inbound_server is not None:
             await super(AsyncioProtocolProxy, self).stop()
+        self.disarm_hard_exit()                         # the orderly stop completed; a hung stop never gets here
 
     def _on_terminate_signal(self, signum: int):
         """SIGTERM is how the manager stops a proxy: stop gracefully so protocols get to flush their state."""
@@ -182,3 +183,4 @@ class AsyncioProtocolProxy(AsyncioIPCConnector, ProtocolProxy, ABC):
                 self.loop.remove_signal_handler(signal.SIGTERM)
             except (RuntimeError, ValueError, NotImplementedError):
                 pass
+            self.disarm_hard_exit()                     # stopped in time: no forced exit

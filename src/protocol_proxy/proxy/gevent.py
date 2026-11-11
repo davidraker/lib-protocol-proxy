@@ -123,6 +123,7 @@ class GeventProtocolProxy(GeventIPCConnector, ProtocolProxy, ABC):
             self._signal_watcher.cancel()
             self._signal_watcher = None
         super(GeventProtocolProxy, self).stop()
+        self.disarm_hard_exit()                         # the orderly stop completed; a hung stop never gets here
 
     def _watch_manager(self):
         while not self._stop and self.manager_alive():
@@ -172,4 +173,5 @@ class GeventProtocolProxy(GeventIPCConnector, ProtocolProxy, ABC):
             if self._signal_watcher is not None:        # stop() ran from the signal handler and kept it armed
                 self._signal_watcher.cancel()
                 self._signal_watcher = None
+            self.disarm_hard_exit()                     # stopped in time: no forced exit
         return 0 if self.registered else 1
